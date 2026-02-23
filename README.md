@@ -38,7 +38,7 @@ docker compose up -d
 
 ## Motivation
 
-1) I'm working on a project that receives webhooks from various sources (Todoist, Telegram, etc.). I used to deploy it on a VPS, but the development cycle was too long:
+I'm working on a project that receives webhooks from various sources (Todoist, Telegram, etc.). I used to deploy it on a VPS, but the development cycle was too long:
 
 1. Build container image (Rust is notorious for its long build times)
 2. Pull container image on VPS
@@ -46,7 +46,7 @@ docker compose up -d
 
 Webhooks Proxy collects all incoming webhooks and stores them in a database. My app polls them on its own schedule. After fetching the webhook data, it deletes them from the database.
 
-2) I prefer self-hosted solutions over cloud services.
+I prefer self-hosted solutions over cloud services.
 
 ## Roadmap
 
