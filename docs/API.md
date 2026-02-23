@@ -65,3 +65,42 @@ Used by your local application or scripts to retrieve pending webhooks for a spe
 *   `headers`: Map of HTTP headers received with the original webhook (excluding hop-by-hop headers).
 *   `payload`: The original JSON body.
 *   `received_at`: Unix timestamp (seconds) when the webhook was received.
+
+## Examples
+
+### Send a Webhook (POST)
+
+```bash
+curl -X POST http://localhost:8080/api/webhook/github \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: mysecret" \
+  -d '{"action":"opened","pull_request":{"id":1}}'
+```
+
+### Read and Delete Webhooks (GET)
+
+```bash
+curl -X GET http://localhost:8080/api/webhook/github \
+  -H "Authorization: Bearer ghi789"
+```
+
+The response will be a JSON array of all pending webhooks for the channel, and they will be deleted immediately after retrieval.
+
+Example response:
+```json
+[
+  {
+    "headers": {
+      "content-type": "application/json",
+      "x-hub-signature-256": "mysecret"
+    },
+    "payload": {
+      "action": "opened",
+      "pull_request": {
+        "id": 1
+      }
+    },
+    "received_at": 1708684800
+  }
+]
+```
