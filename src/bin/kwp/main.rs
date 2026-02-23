@@ -15,6 +15,8 @@ use kwp_lib::outbound::sqlite::Sqlite;
 use logger::get_logging_config;
 use route::{read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route};
 
+use crate::route::version::get_version_route;
+
 pub mod background;
 pub mod logger;
 pub mod route;
@@ -67,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let app = Router::new()
+        .route("/api/version", get(get_version_route))
         .route("/api/webhook/{channel}", post(receive_webhook_route))
         .route("/api/webhook/{channel}", get(read_webhooks_route))
         .layer(DefaultBodyLimit::max(256 * 1024))
