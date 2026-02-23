@@ -27,7 +27,11 @@ docker compose up -d
 
 - **Forwarding with retries**: receive and store webhooks, then forward them to your target service with automatic retries
 - **Poll mode**: fetch webhooks later via REST API
-- Blazing fast and lightweight
+- Blazing fast and lightweight 🦀 (Rust)
+  ```bash
+  CONTAINER ID   NAME                 CPU %     MEM USAGE / LIMIT
+  3c3508ed449b   kwp                  0.00%     5.145MiB / 1.922GiB
+  ```
 
 ## Motivation
 
