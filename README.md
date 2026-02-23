@@ -15,6 +15,14 @@ cp .env-example .env
 docker compose up -d
 ```
 
+## Documentation
+
+- [Installation](docs/INSTALL.md)
+- [Configuration](docs/CONFIG.md)
+- [API](docs/API.md)
+- [Security](docs/SECURITY.md)
+- [FAQ](docs/FAQ.md)
+
 ## Features
 
 - **Forwarding with retries**: receive and store webhooks, then forward them to your target service with automatic retries
@@ -33,5 +41,6 @@ Webhooks Proxy collects all incoming webhooks and stores them in a database. My 
 
 ## Roadmap
 
+- Config: turn on/off API
 - Config: ignore-headers
 - Exponential backoff
