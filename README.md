@@ -48,7 +48,6 @@ Webhooks Proxy provides a single entry point for webhooks following security bes
 
 ## Roadmap
 
-- Webhooks: forwarding with retries
 - Config: ignore-headers
 - Config: turn on/off API
 - Webhooks: support X-Hub-Signature-256 headers
