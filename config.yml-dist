@@ -7,6 +7,7 @@ channels:
     webhook-secret: "your_webhook_secret_here"
     # Header where Telegram sends the webhook-secret
     secret-header: "X-Telegram-Bot-Api-Secret-Token"
+    # max-body-size: 524288  # Optional: override DEFAULT_BODY_LIMIT for this channel (bytes)
 
   # GitHub channel example
   - name: github

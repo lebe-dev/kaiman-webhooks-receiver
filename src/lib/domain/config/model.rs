@@ -38,6 +38,8 @@ pub struct WebhookChannelConfig {
     pub webhook_secret: Option<String>,
     pub secret_header: Option<String>,
     pub forward: Option<ForwardConfig>,
+    #[serde(default)]
+    pub max_body_size: Option<usize>,
 }
 
 impl PartialEq for WebhookChannelConfig {
@@ -47,8 +49,12 @@ impl PartialEq for WebhookChannelConfig {
             && self.webhook_secret == other.webhook_secret
             && self.secret_header == other.secret_header
             && self.forward == other.forward
+            && self.max_body_size == other.max_body_size
     }
 }
+
+const MIN_BODY_LIMIT: usize = 64;
+const MAX_BODY_LIMIT: usize = 104_857_600; // 100 MB
 
 #[derive(PartialEq, Clone, Debug)]
 pub struct AppConfig {
@@ -58,6 +64,7 @@ pub struct AppConfig {
     pub data_path: String,
     pub db_cnn: String,
     pub channels: Vec<WebhookChannelConfig>,
+    pub default_body_limit: usize,
 }
 
 impl AppConfig {
@@ -71,6 +78,38 @@ impl AppConfig {
     /// Plain name lookup — for POST (incoming webhook routing).
     pub fn find_channel_by_name(&self, name: &str) -> Option<&WebhookChannelConfig> {
         self.channels.iter().find(|c| c.name == name)
+    }
+
+    /// Returns the maximum body limit across all channels and the global default.
+    /// Used to set Axum's DefaultBodyLimit layer.
+    pub fn max_body_limit(&self) -> usize {
+        self.channels
+            .iter()
+            .filter_map(|c| c.max_body_size)
+            .max()
+            .unwrap_or(self.default_body_limit)
+            .max(self.default_body_limit)
+    }
+
+    /// Validates body limit values at startup. Returns Err on invalid config.
+    pub fn validate_body_limits(&self) -> Result<(), String> {
+        if !(MIN_BODY_LIMIT..=MAX_BODY_LIMIT).contains(&self.default_body_limit) {
+            return Err(format!(
+                "default_body_limit {} is out of range [{}, {}]",
+                self.default_body_limit, MIN_BODY_LIMIT, MAX_BODY_LIMIT
+            ));
+        }
+        for ch in &self.channels {
+            if let Some(limit) = ch.max_body_size
+                && !(MIN_BODY_LIMIT..=MAX_BODY_LIMIT).contains(&limit)
+            {
+                return Err(format!(
+                    "channel '{}': max-body-size {} is out of range [{}, {}]",
+                    ch.name, limit, MIN_BODY_LIMIT, MAX_BODY_LIMIT
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -103,6 +142,91 @@ pub enum LoadAppConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn make_app_config(
+        default_body_limit: usize,
+        channels: Vec<WebhookChannelConfig>,
+    ) -> AppConfig {
+        AppConfig {
+            bind: "0.0.0.0:8080".to_string(),
+            log_level: "info".to_string(),
+            log_target: "stdout".to_string(),
+            data_path: "./data".to_string(),
+            db_cnn: "sqlite:test.db".to_string(),
+            channels,
+            default_body_limit,
+        }
+    }
+
+    fn make_channel(name: &str, max_body_size: Option<usize>) -> WebhookChannelConfig {
+        WebhookChannelConfig {
+            name: name.to_string(),
+            api_read_token: "token".to_string(),
+            webhook_secret: None,
+            secret_header: None,
+            forward: None,
+            max_body_size,
+        }
+    }
+
+    #[test]
+    fn test_channel_config_max_body_size_present() {
+        let yaml = r#"
+name: test
+api-read-token: tok
+max-body-size: 1048576
+"#;
+        let cfg: WebhookChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.max_body_size, Some(1_048_576));
+    }
+
+    #[test]
+    fn test_channel_config_max_body_size_absent() {
+        let yaml = r#"
+name: test
+api-read-token: tok
+"#;
+        let cfg: WebhookChannelConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.max_body_size, None);
+    }
+
+    #[test]
+    fn test_max_body_limit_uses_largest() {
+        let channels = vec![
+            make_channel("a", Some(1_048_576)), // 1 MB
+            make_channel("b", None),
+        ];
+        let config = make_app_config(262_144, channels); // global = 256 KB
+        assert_eq!(config.max_body_limit(), 1_048_576);
+    }
+
+    #[test]
+    fn test_max_body_limit_no_overrides() {
+        let channels = vec![make_channel("a", None)];
+        let config = make_app_config(262_144, channels);
+        assert_eq!(config.max_body_limit(), 262_144);
+    }
+
+    #[test]
+    fn test_validate_body_limits_zero_rejected() {
+        let channels = vec![make_channel("a", Some(0))];
+        let config = make_app_config(262_144, channels);
+        assert!(config.validate_body_limits().is_err());
+    }
+
+    #[test]
+    fn test_validate_body_limits_exceeds_max_rejected() {
+        let channels = vec![make_channel("a", Some(200_000_000))]; // 200 MB
+        let config = make_app_config(262_144, channels);
+        assert!(config.validate_body_limits().is_err());
+    }
+
+    #[test]
+    fn test_validate_body_limits_valid() {
+        let channels = vec![make_channel("a", Some(524_288))];
+        let config = make_app_config(262_144, channels);
+        assert!(config.validate_body_limits().is_ok());
+    }
 
     #[test]
     fn test_forward_config_deserialization_full() {

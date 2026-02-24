@@ -6,6 +6,8 @@ use serde::Deserialize;
 use crate::domain::config::model::{AppConfig, LoadAppConfigError, WebhookChannelConfig};
 use crate::domain::config::ports::AppConfigLoader;
 
+const DEFAULT_BODY_LIMIT_BYTES: usize = 262_144; // 256 KB
+
 #[derive(Deserialize)]
 struct WebhookChannelsConfig {
     channels: Vec<WebhookChannelConfig>,
@@ -32,6 +34,21 @@ impl AppConfigLoader for EnvConfigLoader {
 
         let app_config = load_channels_from_file(&config_path)?;
 
+        let default_body_limit: usize = match env::var("DEFAULT_BODY_LIMIT") {
+            Ok(val) => match val.parse() {
+                Ok(v) => v,
+                Err(_) => {
+                    log::warn!(
+                        "invalid DEFAULT_BODY_LIMIT value '{}', using default {}",
+                        val,
+                        DEFAULT_BODY_LIMIT_BYTES
+                    );
+                    DEFAULT_BODY_LIMIT_BYTES
+                }
+            },
+            Err(_) => DEFAULT_BODY_LIMIT_BYTES,
+        };
+
         Ok(AppConfig {
             bind,
             log_level,
@@ -39,6 +56,7 @@ impl AppConfigLoader for EnvConfigLoader {
             data_path,
             db_cnn,
             channels: app_config.channels,
+            default_body_limit,
         })
     }
 }
@@ -200,6 +218,65 @@ mod tests {
         unsafe {
             env::remove_var("DATABASE_URL");
             env::remove_var("CONFIG_FILE");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_default_body_limit_no_env() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::remove_var("DEFAULT_BODY_LIMIT");
+        }
+
+        let loader = EnvConfigLoader;
+        let config = loader.load().unwrap();
+        assert_eq!(config.default_body_limit, 262_144);
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_default_body_limit_valid_env() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::set_var("DEFAULT_BODY_LIMIT", "524288");
+        }
+
+        let loader = EnvConfigLoader;
+        let config = loader.load().unwrap();
+        assert_eq!(config.default_body_limit, 524_288);
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+            env::remove_var("DEFAULT_BODY_LIMIT");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_default_body_limit_invalid_env_falls_back() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::set_var("DEFAULT_BODY_LIMIT", "not-a-number");
+        }
+
+        let loader = EnvConfigLoader;
+        let config = loader.load().unwrap();
+        assert_eq!(config.default_body_limit, 262_144);
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+            env::remove_var("DEFAULT_BODY_LIMIT");
         }
     }
 }

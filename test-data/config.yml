@@ -3,6 +3,7 @@ channels:
     api-read-token: test-token-123
     webhook-secret: test-secret
     secret-header: X-Test-Header
+    # max-body-size: 524288
 
   - name: example
     api-read-token: example-token-456

@@ -33,6 +33,9 @@ async fn main() -> anyhow::Result<()> {
 
     let config_loader = EnvConfigLoader;
     let app_config = config_loader.load()?;
+    app_config
+        .validate_body_limits()
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     let logging_config = get_logging_config(&app_config.log_level, &app_config.log_target);
     log4rs::init_config(logging_config)?;
@@ -72,7 +75,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/version", get(get_version_route))
         .route("/api/webhook/{channel}", post(receive_webhook_route))
         .route("/api/webhook/{channel}", get(read_webhooks_route))
-        .layer(DefaultBodyLimit::max(256 * 1024))
+        .layer(DefaultBodyLimit::max(app_config.max_body_limit()))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&app_config.bind).await?;
