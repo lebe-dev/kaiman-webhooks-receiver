@@ -54,7 +54,7 @@ service:
   # This sets the service type more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#publishing-services-service-types
   type: ClusterIP
   # This sets the ports more information can be found here: https://kubernetes.io/docs/concepts/services-networking/service/#field-spec-ports
-  port: 80
+  port: 8080
 
 # This block is for setting up the ingress for more information can be found here: https://kubernetes.io/docs/concepts/services-networking/ingress/
 ingress:
@@ -159,3 +159,35 @@ nodeSelector: {}
 tolerations: []
 
 affinity: {}
+
+# -- Environment variables injected into the container via ConfigMap + envFrom.
+# Keys are exact env var names. Easy to extend without chart changes.
+envs:
+  BIND_ADDRESS: "0.0.0.0:8080"
+  LOG_LEVEL: "info"
+  LOG_TARGET: "stdout"
+  DATA_PATH: "/app/data"
+  DATABASE_URL: "sqlite:///app/data/kwp.db?mode=rwc"
+  CONFIG_FILE: "/app/config.yml"
+  IGNORED_HEADERS: "host,content-length,transfer-encoding,connection,content-type"
+  # DEFAULT_BODY_LIMIT: "262144"  # Optional: uncomment to override (bytes)
+
+# -- Raw YAML content for /app/config.yml — placed in a Secret and mounted into the container.
+# See config.yml-dist for full examples. Contains secrets (api-read-token, webhook-secret).
+config: |
+  channels: []
+# config: vault:kv/data/infra/kaiman-webhooks-proxy#config.yml
+# -- Annotations for the channels Secret (e.g. for external-secrets or Vault Agent).
+secretAnnotations: {}
+  # vault.security.banzaicloud.io/vault-addr: https://vault.company.com
+  # vault.security.banzaicloud.io/vault-role: shortly
+  # vault.security.banzaicloud.io/vault-path: kubernetes_internal
+
+# -- Persistence for the SQLite data directory (/app/data).
+# Warning: ReadWriteOnce PVCs do not support replicaCount > 1 with most storage classes.
+persistence:
+  enabled: true
+  size: 100Mi
+  # Leave empty to use the cluster-default StorageClass.
+  storageClassName: ""
+  accessMode: ReadWriteOnce
