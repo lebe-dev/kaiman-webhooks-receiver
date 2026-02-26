@@ -1,3 +1,4 @@
+use std::fmt;
 use std::net::IpAddr;
 
 use ipnet::IpNet;
@@ -13,6 +14,15 @@ pub enum SecretType {
     #[default]
     Plain,
     HmacSha256,
+}
+
+impl fmt::Display for SecretType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            SecretType::Plain => write!(f, "plain"),
+            SecretType::HmacSha256 => write!(f, "hmac-sha256"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -46,6 +56,23 @@ impl PartialEq for WebhookForwardConfig {
             && self.sign_header == other.sign_header
             && self.sign_secret == other.sign_secret
             && self.sign_template == other.sign_template
+    }
+}
+
+impl fmt::Display for WebhookForwardConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "WebhookForwardConfig {{ url: {}, interval_seconds: {}, expected_status: {}, \
+             timeout_seconds: {}, sign_header: {}, sign_secret: {}, sign_template: {} }}",
+            self.url,
+            self.interval_seconds,
+            self.expected_status,
+            self.timeout_seconds,
+            self.sign_header.as_ref().map(|_| "***").unwrap_or("None"),
+            self.sign_secret.as_ref().map(|_| "***").unwrap_or("None"),
+            self.sign_template.as_ref().map(|_| "***").unwrap_or("None"),
+        )
     }
 }
 
@@ -99,6 +126,45 @@ impl PartialEq for WebhookChannelConfig {
     }
 }
 
+impl fmt::Display for WebhookChannelConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let webhook_secret_display = if self.webhook_secret.is_some() {
+            "***".to_string()
+        } else {
+            "None".to_string()
+        };
+        let secret_header_display = self
+            .secret_header
+            .clone()
+            .unwrap_or_else(|| "None".to_string());
+        let secret_extract_template_display = if self.secret_extract_template.is_some() {
+            "***".to_string()
+        } else {
+            "None".to_string()
+        };
+        let forward_display = if self.forward.is_some() {
+            "...".to_string()
+        } else {
+            "None".to_string()
+        };
+
+        write!(
+            f,
+            "WebhookChannelConfig {{ name: {}, api_read_token: ***, webhook_secret: {}, \
+             secret_header: {}, secret_type: {}, secret_extract_template: {}, forward: {}, \
+             max_body_size: {:?}, allowed_ips: {:?} }}",
+            self.name,
+            webhook_secret_display,
+            secret_header_display,
+            self.secret_type,
+            secret_extract_template_display,
+            forward_display,
+            self.max_body_size,
+            self.allowed_ips,
+        )
+    }
+}
+
 const MIN_BODY_LIMIT: usize = 64;
 const MAX_BODY_LIMIT: usize = 104_857_600; // 100 MB
 
@@ -113,6 +179,7 @@ pub struct AppConfig {
     pub default_body_limit: usize,
     pub ignored_headers: Vec<String>,
     pub metrics_enabled: bool,
+    pub trusted_proxies: Vec<String>,
 }
 
 impl AppConfig {
@@ -230,6 +297,33 @@ impl AppConfig {
     }
 }
 
+impl fmt::Display for AppConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let channels_display = self
+            .channels
+            .iter()
+            .map(|ch| ch.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        write!(
+            f,
+            "AppConfig {{ bind: {}, log_level: {}, log_target: {}, data_path: {}, \
+             db_cnn: ***, channels: [{}], default_body_limit: {}, \
+             ignored_headers: {:?}, metrics_enabled: {}, trusted_proxies: {:?} }}",
+            self.bind,
+            self.log_level,
+            self.log_target,
+            self.data_path,
+            channels_display,
+            self.default_body_limit,
+            self.ignored_headers,
+            self.metrics_enabled,
+            self.trusted_proxies,
+        )
+    }
+}
+
 #[derive(PartialEq, Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct AppConfigDto {
@@ -274,6 +368,7 @@ mod tests {
             default_body_limit,
             ignored_headers: vec![],
             metrics_enabled: false,
+            trusted_proxies: vec![],
         }
     }
 
@@ -619,5 +714,57 @@ sign-template: "sha256={{ signature }}"
     fn test_validate_templates_all_ok() {
         let config = make_app_config(262_144, vec![make_channel("a", None)]);
         assert!(config.validate_templates().is_ok());
+    }
+
+    #[test]
+    fn test_secret_type_display() {
+        assert_eq!(SecretType::Plain.to_string(), "plain");
+        assert_eq!(SecretType::HmacSha256.to_string(), "hmac-sha256");
+    }
+
+    #[test]
+    fn test_webhook_forward_config_display_hides_secrets() {
+        let config = WebhookForwardConfig {
+            url: "https://example.com/hook".to_string(),
+            interval_seconds: 30,
+            expected_status: 200,
+            timeout_seconds: 15,
+            sign_header: Some("X-Sig".to_string()),
+            sign_secret: Some("super_secret".to_string()),
+            sign_template: Some("sha256={{ signature }}".to_string()),
+        };
+        let display = config.to_string();
+        assert!(display.contains("https://example.com/hook"));
+        assert!(display.contains("30"));
+        assert!(!display.contains("super_secret"));
+        assert!(display.contains("sign_secret: ***"));
+        assert!(display.contains("sign_template: ***"));
+    }
+
+    #[test]
+    fn test_webhook_channel_config_display_hides_tokens() {
+        let mut config = make_channel("my_channel", None);
+        config.webhook_secret = Some("my_webhook_secret".to_string());
+        config.secret_extract_template = Some("Bearer {{ secret }}".to_string());
+        let display = config.to_string();
+        assert!(display.contains("my_channel"));
+        assert!(!display.contains("my_webhook_secret"));
+        assert!(!display.contains("{{ secret }}"));
+        assert!(display.contains("api_read_token: ***"));
+        assert!(display.contains("webhook_secret: ***"));
+        assert!(display.contains("secret_extract_template: ***"));
+    }
+
+    #[test]
+    fn test_app_config_display_hides_db_connection() {
+        let channels = vec![make_channel("ch1", None), make_channel("ch2", None)];
+        let config = make_app_config(262_144, channels);
+        let display = config.to_string();
+        assert!(display.contains("bind: 0.0.0.0:8080"));
+        assert!(display.contains("log_level: info"));
+        assert!(!display.contains("sqlite:test.db"));
+        assert!(display.contains("db_cnn: ***"));
+        assert!(display.contains("ch1"));
+        assert!(display.contains("ch2"));
     }
 }

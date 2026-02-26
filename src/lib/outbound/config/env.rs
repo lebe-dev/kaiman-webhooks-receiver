@@ -67,6 +67,15 @@ impl AppConfigLoader for EnvConfigLoader {
         let metrics_enabled =
             matches!(env::var("METRICS_ENABLED").as_deref(), Ok("1") | Ok("true"));
 
+        let trusted_proxies: Vec<String> = match env::var("TRUSTED_PROXIES") {
+            Ok(val) => val
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Err(_) => vec![],
+        };
+
         Ok(AppConfig {
             bind,
             log_level,
@@ -77,6 +86,7 @@ impl AppConfigLoader for EnvConfigLoader {
             default_body_limit,
             ignored_headers,
             metrics_enabled,
+            trusted_proxies,
         })
     }
 }

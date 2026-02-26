@@ -31,7 +31,7 @@ pub async fn run_forwarder<R: WebhookRepository>(
                 tokio::time::sleep(interval).await;
             }
             Ok(None) => {
-                log::trace!(
+                log::debug!(
                     "[forwarder:{}] no pending webhooks, sleeping",
                     channel.as_str()
                 );

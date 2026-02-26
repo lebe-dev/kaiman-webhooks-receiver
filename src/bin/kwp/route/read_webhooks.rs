@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::AppState;
+use crate::middleware::client_ip::ClientIp;
 use kwp_lib::domain::webhook::model::WebhookChannel;
 
 #[derive(Serialize)]
@@ -22,9 +23,15 @@ pub struct WebhookDto {
 
 pub async fn read_webhooks_route(
     State(state): State<Arc<AppState>>,
+    Extension(client_ip): Extension<ClientIp>,
     headers: HeaderMap,
     Path(channel_name): Path<String>,
 ) -> impl IntoResponse {
+    log::debug!(
+        "read webhooks request from {} for channel: {}",
+        client_ip.0,
+        channel_name
+    );
     log::info!("request to read webhooks for channel: {}", channel_name);
 
     let bearer = headers

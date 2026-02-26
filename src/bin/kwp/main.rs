@@ -24,6 +24,7 @@ use crate::route::version::get_version_route;
 
 pub mod background;
 pub mod logger;
+pub mod middleware;
 pub mod route;
 
 #[derive(Clone)]
@@ -106,6 +107,10 @@ async fn main() -> anyhow::Result<()> {
 
     let app = app
         .layer(DefaultBodyLimit::max(app_config.max_body_limit()))
+        .layer(axum::middleware::from_fn(
+            middleware::client_ip::ClientIpExtractor::middleware,
+        ))
+        .layer(axum::Extension(app_config.trusted_proxies.clone()))
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&app_config.bind).await?;

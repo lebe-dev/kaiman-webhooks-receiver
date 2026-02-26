@@ -173,6 +173,8 @@ envs:
   # DEFAULT_BODY_LIMIT: "262144"  # Optional: uncomment to override (bytes)
   # 1 - enable metrics
   METRICS_ENABLED: "0"
+  # Trusted reverse proxy IPs/CIDRs (comma-separated). Leave unset to use direct connection IP.
+  # TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12"
 
 # -- Raw YAML content for /app/config.yml — placed in a Secret and mounted into the container.
 # See config.yml-dist for full examples. Contains secrets (api-read-token, webhook-secret).

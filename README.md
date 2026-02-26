@@ -49,6 +49,7 @@ Webhooks Proxy provides a single entry point for webhooks following security bes
 
 ## Roadmap
 
+- Endpoint: /api/health
 - Support self-signed certificates for target services
 - Extend metrics: misconfiguration in channels
 - Config: turn on/off API

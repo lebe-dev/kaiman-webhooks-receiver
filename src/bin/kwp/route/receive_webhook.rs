@@ -1,16 +1,17 @@
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
+    Extension,
     body::Bytes,
-    extract::{ConnectInfo, Path, State},
+    extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
+use crate::middleware::client_ip::ClientIp;
 use kwp_lib::domain::config::model::SecretType;
 use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::model::WebhookChannel;
@@ -26,12 +27,17 @@ fn inc_receive(channel: &str, status: &'static str) {
 
 pub async fn receive_webhook_route(
     State(state): State<Arc<AppState>>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Extension(client_ip): Extension<ClientIp>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    log::info!("received webhook for channel: {}", channel_name);
+    log::debug!(
+        "incoming webhook from {} for channel: '{}'",
+        client_ip.0,
+        channel_name
+    );
+    log::info!(">>> incoming webhook for channel: '{}'", channel_name);
 
     let channel_config = match state.config.find_channel_by_name(&channel_name) {
         Some(c) => c,
@@ -42,8 +48,8 @@ pub async fn receive_webhook_route(
         }
     };
 
-    if !channel_config.is_ip_allowed(&addr.ip()) {
-        log::warn!("IP {} blocked for channel: {}", addr.ip(), channel_name);
+    if !channel_config.is_ip_allowed(&client_ip.0) {
+        log::warn!("IP {} blocked for channel: {}", client_ip.0, channel_name);
         inc_receive(&channel_name, "ip_blocked");
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
@@ -183,12 +189,11 @@ pub async fn receive_webhook_route(
 mod tests {
     use std::sync::Arc;
 
-    use std::net::{IpAddr, SocketAddr};
+    use std::net::IpAddr;
 
     use axum::{
-        Router,
+        Extension, Router,
         body::Body,
-        extract::connect_info::MockConnectInfo,
         http::{self, Request, StatusCode},
         routing::{get, post},
     };
@@ -200,6 +205,7 @@ mod tests {
     use kwp_lib::outbound::sqlite::Sqlite;
 
     use crate::AppState;
+    use crate::middleware::client_ip::ClientIp;
     use crate::route::{
         read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route,
     };
@@ -281,6 +287,7 @@ mod tests {
                 "transfer-encoding".to_string(),
             ],
             metrics_enabled: false,
+            trusted_proxies: vec![],
         };
         let db = Sqlite::new("sqlite::memory:").await.unwrap();
         let state = Arc::new(AppState {
@@ -288,11 +295,10 @@ mod tests {
             webhook_service: WebhookServiceImpl::new(db),
             metrics_handle: None,
         });
-        let addr = SocketAddr::new(client_ip, 12345);
         Router::new()
             .route("/api/webhook/{channel}", post(receive_webhook_route))
             .route("/api/webhook/{channel}", get(read_webhooks_route))
-            .layer(MockConnectInfo(addr))
+            .layer(Extension(ClientIp(client_ip)))
             .with_state(state)
     }
 

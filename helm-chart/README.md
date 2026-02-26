@@ -27,6 +27,7 @@ All application env vars are injected via a ConfigMap. Keys are exact env var na
 | `envs.CONFIG_FILE` | Path to the channels config file inside the container | `/app/config.yml` |
 | `envs.IGNORED_HEADERS` | Comma-separated list of headers to strip when receiving/forwarding webhooks | `host,content-length,transfer-encoding,connection,content-type` |
 | `envs.DEFAULT_BODY_LIMIT` | Max request body size in bytes. Omit to use the app default (262144 = 256 KB) | _(unset)_ |
+| `envs.TRUSTED_PROXIES` | Comma-separated list of trusted reverse proxy IPs/CIDRs. When set, `X-Forwarded-For`/`X-Real-IP` headers are used for client IP resolution. Leave unset to always use the direct connection IP (safe default) | _(unset)_ |
 
 ### Channels Config (`.config`)
 
