@@ -12,7 +12,7 @@ RUN cargo build --bin kwp --release && \
     upx -9 --lzma target/release/kwp && \
     chmod +x target/release/kwp
 
-FROM alpine:3.23
+FROM alpine:3.23.3
 
 WORKDIR /app
 
