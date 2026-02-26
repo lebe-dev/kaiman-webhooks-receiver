@@ -6,6 +6,9 @@ trivyReportFile := "docs/trivy-scan-report.txt"
 chartName := `cat helm-chart/Chart.yaml | yq -r '.name'`
 chartVersion := `cat helm-chart/Chart.yaml | yq -r '.version'`
 
+cleanup:
+    rm -f *.tgz
+
 format:
     cargo fmt
 
