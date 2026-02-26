@@ -19,6 +19,7 @@ WORKDIR /app
 RUN apk add libressl-dev && \
     addgroup -g 10001 -S app && \
     adduser -u 10001 -D -S -G app -h /app app && \
+    mkdir /app/data && \
     chmod 700 /app && \
     chown -R app:app /app
 
