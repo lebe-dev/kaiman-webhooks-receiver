@@ -75,7 +75,7 @@ impl ClientIpExtractor {
             }
         }
 
-        log::debug!(
+        log::trace!(
             "no valid proxy headers found, using connection IP: {}",
             connection_ip
         );

@@ -108,7 +108,13 @@ pub async fn run_forwarder<R: WebhookRepository>(
 
                 match request.send().await {
                     Err(e) => {
-                        log::warn!("[forwarder:{}] request failed: {}", channel.as_str(), e);
+                        let mut cause = format!("{e}");
+                        let mut src: &dyn std::error::Error = &e;
+                        while let Some(next) = src.source() {
+                            cause.push_str(&format!(": {next}"));
+                            src = next;
+                        }
+                        log::warn!("[forwarder:{}] request failed: {}", channel.as_str(), cause);
                         inc_forward(&channel, "network_error");
                         tokio::time::sleep(interval).await;
                     }
