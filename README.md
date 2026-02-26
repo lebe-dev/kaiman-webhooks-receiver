@@ -49,5 +49,6 @@ Webhooks Proxy provides a single entry point for webhooks following security bes
 
 ## Roadmap
 
+- Support self-signed certificates for target services
 - Config: turn on/off API
 - Exponential backoff
