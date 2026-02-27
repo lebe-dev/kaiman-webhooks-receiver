@@ -28,6 +28,23 @@ test:
     cargo test --lib
     cargo test --bin kwp
 
+run-backend:
+    cargo run
+
+run-frontend:
+    cd frontend && yarn && npm run dev -- --port=4200
+
+# FRONTEND
+
+frontend-install:
+    cd frontend && npm install
+
+frontend-build:
+    cd frontend && npm run build
+
+build-release: frontend-build lint
+    cargo build --release
+
 # HELM CHART
 
 test-chart:
