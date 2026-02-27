@@ -76,7 +76,17 @@ impl AppConfigLoader for EnvConfigLoader {
             Err(_) => vec![],
         };
 
-        let ui_access_token = env::var("UI_ACCESS_TOKEN").ok();
+        let ui_access_token = match env::var("UI_ACCESS_TOKEN") {
+            Ok(token) => token,
+            Err(_) => {
+                let generated = uuid::Uuid::new_v4().to_string();
+                log::warn!(
+                    "UI_ACCESS_TOKEN is not set — generated a temporary token for this session"
+                );
+                println!("UI_ACCESS_TOKEN={generated}");
+                generated
+            }
+        };
 
         Ok(AppConfig {
             bind,
@@ -89,7 +99,7 @@ impl AppConfigLoader for EnvConfigLoader {
             ignored_headers,
             metrics_enabled,
             trusted_proxies,
-            ui_access_token,
+            ui_access_token: Some(ui_access_token),
         })
     }
 }
