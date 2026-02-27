@@ -2,6 +2,7 @@
   import { listWebhooks, type WebhookItem } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
+  import { RotateCw } from "@lucide/svelte";
 
   let { channel }: { channel: string } = $props();
 
@@ -43,8 +44,14 @@
 
 <div class="space-y-4">
   <div class="flex items-center gap-2">
-    <Button variant="outline" size="sm" onclick={load} disabled={loading}>
-      {loading ? "Loading..." : "Refresh"}
+    <Button
+      variant="outline"
+      size="sm"
+      onclick={load}
+      disabled={loading}
+      class={loading ? "animate-spin" : ""}
+    >
+      <RotateCw size={16} />
     </Button>
     <span class="text-sm text-muted-foreground">
       {webhooks.length} webhook{webhooks.length !== 1 ? "s" : ""}

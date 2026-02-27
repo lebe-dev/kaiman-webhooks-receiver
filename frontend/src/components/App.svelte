@@ -10,8 +10,10 @@
         TabsContent,
     } from "$lib/components/ui/tabs";
     import { Toaster } from "$lib/components/ui/sonner";
+    import { FishingHook, Bug, LogOut } from "@lucide/svelte";
     import { fetchConfig, type AppConfigResponse } from "$lib/api";
     import { clearToken } from "$lib/auth";
+    import { version } from "../../package.json";
 
     let config = $state<AppConfigResponse | null>(null);
     let selectedChannel = $state("");
@@ -45,10 +47,11 @@
             <div class="flex items-center justify-between mb-6">
                 <h1 class="text-2xl font-bold">Kaiman Webhooks Proxy</h1>
                 <button
-                    class="text-sm text-muted-foreground hover:text-foreground underline"
+                    class="text-muted-foreground hover:text-foreground transition-colors"
                     onclick={logout}
+                    title="Logout"
                 >
-                    Logout
+                    <LogOut class="w-5 h-5" />
                 </button>
             </div>
 
@@ -75,8 +78,14 @@
 
                 <Tabs value="viewer">
                     <TabsList>
-                        <TabsTrigger value="viewer">Webhooks</TabsTrigger>
-                        <TabsTrigger value="debug">Debug</TabsTrigger>
+                        <TabsTrigger value="viewer">
+                            <FishingHook class="w-4 h-4" />
+                            Webhooks
+                        </TabsTrigger>
+                        <TabsTrigger value="debug">
+                            <Bug class="w-4 h-4" />
+                            Debug
+                        </TabsTrigger>
                     </TabsList>
                     <TabsContent value="viewer">
                         {#if selectedChannel}
@@ -93,6 +102,19 @@
                     </TabsContent>
                 </Tabs>
             {/if}
+
+            <footer class="mt-12 pt-6 border-t text-xs text-muted-foreground flex items-center justify-center gap-2">
+                <span>v{version}</span>
+                <span>|</span>
+                <a
+                    href="https://github.com/lebe-dev/kaiman-webhooks-proxy"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="underline hover:text-foreground transition-colors"
+                >
+                    GITHUB
+                </a>
+            </footer>
         </div>
     {/snippet}
 </TokenGate>
