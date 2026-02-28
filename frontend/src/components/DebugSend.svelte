@@ -8,12 +8,12 @@
   let {
     channel,
     channelConfig,
+    payloadInput = $bindable('{\n  \n}'),
   }: {
     channel: string;
     channelConfig: ChannelConfig;
+    payloadInput?: string;
   } = $props();
-
-  let payloadInput = $state('{\n  \n}');
   let secretInput = $state("");
   let result = $state<TestSendResult | null>(null);
   let sending = $state(false);

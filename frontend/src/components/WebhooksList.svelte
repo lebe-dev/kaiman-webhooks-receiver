@@ -2,9 +2,9 @@
   import { listWebhooks, type WebhookItem } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
-  import { RotateCw } from "@lucide/svelte";
+  import { RotateCw, Copy } from "@lucide/svelte";
 
-  let { channel }: { channel: string } = $props();
+  let { channel, onCopyToDebug }: { channel: string; onCopyToDebug?: (payload: string) => void } = $props();
 
   let webhooks = $state<WebhookItem[]>([]);
   let loading = $state(false);
@@ -33,6 +33,12 @@
 
   function formatDate(ts: number): string {
     return new Date(ts * 1000).toLocaleString();
+  }
+
+  function handleCopyToDebug(webhook: WebhookItem) {
+    const payload = JSON.stringify(webhook.payload, null, 2);
+    onCopyToDebug?.(payload);
+    toast.success("Payload copied to Debug tab");
   }
 
   $effect(() => {
@@ -68,12 +74,23 @@
             <span class="text-xs text-muted-foreground font-mono">
               #{wh.id} &middot; {formatDate(wh.received_at)}
             </span>
-            <button
-              class="text-xs text-muted-foreground hover:text-foreground underline"
-              onclick={() => toggleHeaders(wh.id)}
-            >
-              {expandedHeaders.has(wh.id) ? "hide headers" : "show headers"}
-            </button>
+            <div class="flex items-center gap-2">
+              <button
+                class="text-xs text-muted-foreground hover:text-foreground underline"
+                onclick={() => toggleHeaders(wh.id)}
+              >
+                {expandedHeaders.has(wh.id) ? "hide headers" : "show headers"}
+              </button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={() => handleCopyToDebug(wh)}
+                title="Copy to Debug tab"
+                class="h-5 px-2"
+              >
+                <Copy class="w-3 h-3" />
+              </Button>
+            </div>
           </div>
 
           {#if expandedHeaders.has(wh.id)}

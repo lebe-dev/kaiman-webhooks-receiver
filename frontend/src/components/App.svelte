@@ -18,6 +18,8 @@
     let config = $state<AppConfigResponse | null>(null);
     let selectedChannel = $state("");
     let configError = $state(false);
+    let activeTab = $state("viewer");
+    let debugPayload = $state('{\n  \n}');
 
     let currentChannelConfig = $derived(
         config?.channels.find((c) => c.name === selectedChannel) ?? null,
@@ -38,6 +40,11 @@
         clearToken();
         window.location.reload();
     }
+
+    function copyToDebug(payload: string) {
+        debugPayload = payload;
+        activeTab = "debug";
+    }
 </script>
 
 <Toaster />
@@ -51,7 +58,7 @@
                     onclick={logout}
                     title="Logout"
                 >
-                    <LogOut class="w-5 h-5" />
+                    <LogOut class="w-4 h-4" />
                 </button>
             </div>
 
@@ -76,7 +83,7 @@
                     />
                 </div>
 
-                <Tabs value="viewer">
+                <Tabs bind:value={activeTab}>
                     <TabsList>
                         <TabsTrigger value="viewer">
                             <FishingHook class="w-4 h-4" />
@@ -89,7 +96,10 @@
                     </TabsList>
                     <TabsContent value="viewer">
                         {#if selectedChannel}
-                            <WebhooksList channel={selectedChannel} />
+                            <WebhooksList
+                                channel={selectedChannel}
+                                onCopyToDebug={copyToDebug}
+                            />
                         {/if}
                     </TabsContent>
                     <TabsContent value="debug">
@@ -97,13 +107,16 @@
                             <DebugSend
                                 channel={selectedChannel}
                                 channelConfig={currentChannelConfig}
+                                bind:payloadInput={debugPayload}
                             />
                         {/if}
                     </TabsContent>
                 </Tabs>
             {/if}
 
-            <footer class="mt-12 pt-6 border-t text-xs text-muted-foreground flex items-center justify-center gap-2">
+            <footer
+                class="mt-12 pt-6 border-t text-xs text-muted-foreground flex items-center justify-center gap-2"
+            >
                 <span>v{version}</span>
                 <span>|</span>
                 <a
