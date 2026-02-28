@@ -55,8 +55,12 @@
     {#snippet children()}
         <div class="p-6 max-w-5xl mx-auto">
             <div class="flex items-center justify-between mb-6">
-                <h1 class="text-2xl font-bold">
-                    <div class="text-gray-400 text-sm font-medium">Kaiman</div>
+                <h1 class="text-xl font-semibold">
+                    <div
+                        class="text-primary dark:text-primary/70 text-sm font-medium"
+                    >
+                        Kaiman
+                    </div>
                     Webhooks Proxy
                 </h1>
 
