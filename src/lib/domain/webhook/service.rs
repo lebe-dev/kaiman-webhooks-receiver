@@ -3,7 +3,8 @@ use std::collections::HashMap;
 use bytes::Bytes;
 
 use super::model::{
-    ListWebhooksError, ReadWebhooksError, ReceiveWebhookError, Webhook, WebhookChannel,
+    DeleteWebhookError, ListWebhooksError, ReadWebhooksError, ReceiveWebhookError, Webhook,
+    WebhookChannel,
 };
 use super::ports::WebhookRepository;
 
@@ -72,5 +73,21 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
         );
 
         Ok(webhooks)
+    }
+
+    pub async fn delete_webhook(
+        &self,
+        channel: &WebhookChannel,
+        webhook_id: i64,
+    ) -> Result<(), DeleteWebhookError> {
+        self.repository.delete_by_id(webhook_id).await?;
+
+        log::debug!(
+            "Deleted webhook id={} for channel={}",
+            webhook_id,
+            channel.as_str()
+        );
+
+        Ok(())
     }
 }

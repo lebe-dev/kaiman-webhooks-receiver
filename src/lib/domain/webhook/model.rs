@@ -66,3 +66,9 @@ pub enum ListWebhooksError {
     #[error(transparent)]
     RepositoryError(#[from] WebhookRepositoryError),
 }
+
+#[derive(Debug, Error)]
+pub enum DeleteWebhookError {
+    #[error(transparent)]
+    RepositoryError(#[from] WebhookRepositoryError),
+}

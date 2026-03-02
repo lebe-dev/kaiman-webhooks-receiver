@@ -1,14 +1,16 @@
 <script lang="ts">
-  import { listWebhooks, type WebhookItem } from "$lib/api";
+  import { deleteWebhook, listWebhooks, type WebhookItem } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
-  import { RotateCw, Copy } from "@lucide/svelte";
+  import { RotateCw, Copy, Trash2 } from "@lucide/svelte";
 
   let { channel, onCopyToDebug }: { channel: string; onCopyToDebug?: (payload: string) => void } = $props();
 
   let webhooks = $state<WebhookItem[]>([]);
   let loading = $state(false);
   let expandedHeaders = $state<Set<number>>(new Set());
+  let deleteConfirmId = $state<number | null>(null);
+  let deleting = $state(false);
 
   async function load() {
     loading = true;
@@ -39,6 +41,24 @@
     const payload = JSON.stringify(webhook.payload, null, 2);
     onCopyToDebug?.(payload);
     toast.success("Payload copied to Debug tab");
+  }
+
+  async function handleDelete(id: number) {
+    if (!confirm(`Delete webhook #${id}?`)) {
+      return;
+    }
+
+    deleting = true;
+    try {
+      await deleteWebhook(channel, id);
+      webhooks = webhooks.filter((w) => w.id !== id);
+      toast.success("Webhook deleted");
+      deleteConfirmId = null;
+    } catch {
+      toast.error("Failed to delete webhook");
+    } finally {
+      deleting = false;
+    }
   }
 
   $effect(() => {
@@ -89,6 +109,16 @@
                 class="h-5 px-2"
               >
                 <Copy class="w-3 h-3" />
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onclick={() => handleDelete(wh.id)}
+                disabled={deleting}
+                title="Delete webhook"
+                class="h-5 px-2 text-destructive hover:text-destructive hover:bg-destructive/10"
+              >
+                <Trash2 class="w-3 h-3" />
               </Button>
             </div>
           </div>

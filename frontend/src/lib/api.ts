@@ -74,3 +74,13 @@ export async function testSend(
   }
   return res.json();
 }
+
+export async function deleteWebhook(
+  channel: string,
+  webhookId: number
+): Promise<void> {
+  const res = await apiFetch(`/api/webhook/${channel}/${webhookId}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`Failed to delete webhook: ${res.status}`);
+}

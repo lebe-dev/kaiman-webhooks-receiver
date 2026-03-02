@@ -5,7 +5,7 @@ use axum::{
     Router,
     extract::DefaultBodyLimit,
     http::StatusCode,
-    routing::{any, get, post},
+    routing::{any, delete, get, post},
 };
 use kwp_lib::VERSION;
 use kwp_lib::domain::config::model::AppConfig;
@@ -17,7 +17,8 @@ use kwp_lib::outbound::sqlite::Sqlite;
 use logger::get_logging_config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use route::{
-    config::get_config_route, list_webhooks::list_webhooks_route, metrics::metrics_route,
+    config::get_config_route, delete_webhook::delete_webhook_route,
+    list_webhooks::list_webhooks_route, metrics::metrics_route,
     read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route,
     sign_webhook::sign_webhook_route, test_send::test_send_route,
 };
@@ -111,6 +112,7 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/webhook/{channel}", post(receive_webhook_route))
             .route("/api/webhook/{channel}", get(read_webhooks_route))
             .route("/api/webhook/{channel}/list", get(list_webhooks_route))
+            .route("/api/webhook/{channel}/{id}", delete(delete_webhook_route))
             .route("/api/webhook/{channel}/sign", post(sign_webhook_route))
             .route("/api/webhook/{channel}/test-send", post(test_send_route));
 

@@ -1,4 +1,5 @@
 pub mod config;
+pub mod delete_webhook;
 pub mod list_webhooks;
 pub mod metrics;
 pub mod read_webhooks;
