@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             tokio::spawn(background::forward::run_forwarder(
                 channel,
                 forward_cfg,
+                channel_cfg.webhook_secret.clone(),
                 repo,
                 client,
                 ignored_headers,

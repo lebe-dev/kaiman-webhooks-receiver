@@ -84,12 +84,16 @@ pub async fn test_send_route(
     if let Some(sign_header) = &forward_cfg.sign_header {
         let secret_str = match req.secret.as_deref().filter(|s| !s.is_empty()) {
             Some(s) => s.to_string(),
-            None => match forward_cfg.sign_secret.as_deref() {
+            None => match forward_cfg
+                .sign_secret
+                .as_deref()
+                .or(channel_config.webhook_secret.as_deref())
+            {
                 Some(s) => s.to_string(),
                 None => {
                     return (
                         StatusCode::BAD_REQUEST,
-                        "No secret provided and sign_secret is not configured for this channel",
+                        "No secret provided and no sign_secret or webhook_secret configured for this channel",
                     )
                         .into_response();
                 }

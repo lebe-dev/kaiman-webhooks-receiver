@@ -277,10 +277,13 @@ impl AppConfig {
             if let Some(fwd) = &ch.forward {
                 match (&fwd.sign_header, &fwd.sign_secret) {
                     (Some(_), None) => {
-                        return Err(format!(
-                            "channel '{}': sign-header requires sign-secret",
-                            ch.name
-                        ));
+                        if ch.webhook_secret.is_none() {
+                            return Err(format!(
+                                "channel '{}': sign-header requires sign-secret \
+                                 (or a webhook-secret to use as fallback)",
+                                ch.name
+                            ));
+                        }
                     }
                     (None, Some(_)) => {
                         return Err(format!(
@@ -743,7 +746,7 @@ sign-template: "sha256={{ signature }}"
     }
 
     #[test]
-    fn test_validate_templates_sign_header_without_secret() {
+    fn test_validate_templates_sign_header_without_secret_no_webhook_secret() {
         let mut ch = make_channel("a", None);
         ch.forward = Some(WebhookForwardConfig {
             url: "https://x.com".to_string(),
@@ -754,8 +757,27 @@ sign-template: "sha256={{ signature }}"
             sign_secret: None,
             sign_template: None,
         });
+        // No webhook_secret either → must error
         let config = make_app_config(262_144, vec![ch]);
         assert!(config.validate_templates().is_err());
+    }
+
+    #[test]
+    fn test_validate_templates_sign_header_without_secret_but_with_webhook_secret() {
+        let mut ch = make_channel("a", None);
+        ch.webhook_secret = Some("fallback-secret".to_string());
+        ch.forward = Some(WebhookForwardConfig {
+            url: "https://x.com".to_string(),
+            interval_seconds: 10,
+            expected_status: 200,
+            timeout_seconds: 15,
+            sign_header: Some("X-Sig".to_string()),
+            sign_secret: None,
+            sign_template: None,
+        });
+        // webhook_secret present → allowed (will be used as fallback at runtime)
+        let config = make_app_config(262_144, vec![ch]);
+        assert!(config.validate_templates().is_ok());
     }
 
     #[test]

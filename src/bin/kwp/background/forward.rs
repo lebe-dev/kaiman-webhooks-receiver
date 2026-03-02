@@ -17,6 +17,7 @@ fn inc_forward(channel: &WebhookChannel, status: &'static str) {
 pub async fn run_forwarder<R: WebhookRepository>(
     channel: WebhookChannel,
     forward_cfg: WebhookForwardConfig,
+    webhook_secret: Option<String>,
     repo: R,
     http: reqwest::Client,
     ignored_headers: Vec<String>,
@@ -79,9 +80,20 @@ pub async fn run_forwarder<R: WebhookRepository>(
                     request = request.header(key, value);
                 }
 
-                if let (Some(sign_header), Some(sign_secret)) =
-                    (&forward_cfg.sign_header, &forward_cfg.sign_secret)
-                {
+                if let Some(sign_header) = &forward_cfg.sign_header {
+                    let effective_secret = forward_cfg
+                        .sign_secret
+                        .as_deref()
+                        .or(webhook_secret.as_deref());
+                    let Some(sign_secret) = effective_secret else {
+                        log::error!(
+                            "[forwarder:{}] sign-header configured but no sign_secret or webhook_secret available",
+                            channel.as_str()
+                        );
+                        inc_forward(&channel, "internal_error");
+                        tokio::time::sleep(interval).await;
+                        continue;
+                    };
                     let sig = crypto::hmac_sha256_hex(sign_secret.as_bytes(), &body_bytes);
                     let header_value = match forward_cfg.sign_template.as_deref() {
                         Some(tmpl) => match crypto::render_sign_template(tmpl, &sig) {
