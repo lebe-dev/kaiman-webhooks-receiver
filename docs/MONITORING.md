@@ -79,6 +79,22 @@ Counts outgoing forwarding attempts, labeled by channel and outcome.
 | `unexpected_status` | Target responded with a status code different from `expected-status` in config |
 | `internal_error` | Could not read from DB, serialize payload, or render sign template |
 
+### `kwp_channel_security_config`
+
+Gauge exposing the security posture of each channel. Set once at startup.
+
+| Label | Description |
+|---|---|
+| `channel` | Channel name |
+| `feature` | Security feature being checked (see table below) |
+
+**Feature values:**
+
+| `feature` | Value `1` | Value `0` |
+|---|---|---|
+| `ip_allowlist` | `allowed-ips` is configured | No IP restriction — any source accepted |
+| `secret` | `webhook-secret` is configured | No secret validation — requests not authenticated |
+
 ## Example Output
 
 ```
@@ -92,6 +108,15 @@ kwp_webhook_receive_total{channel="github",status="ok"} 17
 # TYPE kwp_webhook_forward_total counter
 kwp_webhook_forward_total{channel="telegram",status="ok"} 41
 kwp_webhook_forward_total{channel="telegram",status="network_error"} 1
+```
+
+```
+# HELP kwp_channel_security_config
+# TYPE kwp_channel_security_config gauge
+kwp_channel_security_config{channel="telegram",feature="ip_allowlist"} 1
+kwp_channel_security_config{channel="telegram",feature="secret"} 1
+kwp_channel_security_config{channel="open",feature="ip_allowlist"} 0
+kwp_channel_security_config{channel="open",feature="secret"} 0
 ```
 
 ## Scrape Configuration
@@ -202,6 +227,24 @@ groups:
         annotations:
           summary: "All webhooks rejected (authentication) on channel {{ $labels.channel }}"
           description: "Channel {{ $labels.channel }} is rejecting all webhooks due to authentication failures. Check if upstream secret has changed."
+
+      # Channel has no webhook secret configured
+      - alert: KwpChannelNoSecret
+        expr: kwp_channel_security_config{feature="secret"} == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Channel {{ $labels.channel }} has no webhook secret"
+          description: "Channel {{ $labels.channel }} does not have webhook-secret configured. Incoming webhooks are not authenticated."
+
+      # Channel has no IP allowlist configured
+      - alert: KwpChannelNoIpAllowlist
+        expr: kwp_channel_security_config{feature="ip_allowlist"} == 0
+        labels:
+          severity: warning
+        annotations:
+          summary: "Channel {{ $labels.channel }} has no IP allowlist"
+          description: "Channel {{ $labels.channel }} does not have allowed-ips configured. Any source IP can send webhooks."
 
       # Internal server errors
       - alert: KWPInternalErrors

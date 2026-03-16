@@ -18,9 +18,9 @@ use logger::get_logging_config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use route::{
     config::get_config_route, delete_webhook::delete_webhook_route,
-    list_webhooks::list_webhooks_route, metrics::metrics_route,
-    read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route,
-    sign_webhook::sign_webhook_route, test_send::test_send_route,
+    list_webhooks::list_webhooks_route, metrics::metrics_route, read_webhooks::read_webhooks_route,
+    receive_webhook::receive_webhook_route, sign_webhook::sign_webhook_route,
+    test_send::test_send_route,
 };
 
 use crate::route::version::get_version_route;
@@ -29,6 +29,7 @@ pub mod background;
 pub mod logger;
 pub mod middleware;
 pub mod route;
+pub mod security_metrics;
 pub mod static_files;
 
 #[derive(Clone)]
@@ -91,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
         let handle = PrometheusBuilder::new()
             .install_recorder()
             .map_err(|e| anyhow::anyhow!("failed to install prometheus recorder: {}", e))?;
+        security_metrics::record_channel_security_gauges(&app_config.channels);
         Some(handle)
     } else {
         None

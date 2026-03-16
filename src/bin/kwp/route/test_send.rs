@@ -92,7 +92,10 @@ pub async fn test_send_route(
             f
         }
         None => {
-            log::debug!("test-send: channel {} has no forward configuration", channel_name);
+            log::debug!(
+                "test-send: channel {} has no forward configuration",
+                channel_name
+            );
             return (
                 StatusCode::BAD_REQUEST,
                 "Channel has no forward configuration",
@@ -116,10 +119,7 @@ pub async fn test_send_route(
     log::debug!("test-send: created base request to {}", forward_cfg.url);
 
     if let Some(sign_header) = &forward_cfg.sign_header {
-        log::debug!(
-            "test-send: sign_header configured: {}",
-            sign_header
-        );
+        log::debug!("test-send: sign_header configured: {}", sign_header);
         let secret_str = match req.secret.as_deref().filter(|s| !s.is_empty()) {
             Some(s) => {
                 log::debug!("test-send: using request-provided secret");
@@ -131,7 +131,9 @@ pub async fn test_send_route(
                 .or(channel_config.webhook_secret.as_deref())
             {
                 Some(s) => {
-                    log::debug!("test-send: using configured secret (sign_secret or webhook_secret)");
+                    log::debug!(
+                        "test-send: using configured secret (sign_secret or webhook_secret)"
+                    );
                     s.to_string()
                 }
                 None => {
@@ -146,7 +148,8 @@ pub async fn test_send_route(
         };
 
         let signature = crypto::hmac_sha256_hex(secret_str.as_bytes(), &body_bytes);
-        log::debug!("test-send: computed signature: {} (first 16 chars: {})",
+        log::debug!(
+            "test-send: computed signature: {} (first 16 chars: {})",
             signature,
             &signature[..signature.len().min(16)]
         );
