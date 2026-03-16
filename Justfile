@@ -40,6 +40,8 @@ frontend-install:
     cd frontend && npm install
 
 frontend-build:
+    jq --arg v "{{version}}" '.version = $v' frontend/package.json > frontend/package.json.tmp && \
+        mv frontend/package.json.tmp frontend/package.json
     cd frontend && npm run build
 
 build-release: frontend-build lint
