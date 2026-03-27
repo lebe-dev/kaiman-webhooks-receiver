@@ -1,24 +1,24 @@
 Version: 0.69.1
 Vulnerability DB:
   Version: 2
-  UpdatedAt: 2026-02-18 00:42:36.376847431 +0000 UTC
-  NextUpdate: 2026-02-19 00:42:36.376847191 +0000 UTC
-  DownloadedAt: 2026-02-18 07:20:02.743972 +0000 UTC
+  UpdatedAt: 2026-03-19 12:35:06.232779536 +0000 UTC
+  NextUpdate: 2026-03-20 12:35:06.232779285 +0000 UTC
+  DownloadedAt: 2026-03-27 09:09:11.462031 +0000 UTC
 Java DB:
   Version: 1
   UpdatedAt: 2025-11-20 00:57:10.039747638 +0000 UTC
   NextUpdate: 2025-11-23 00:57:10.039747518 +0000 UTC
   DownloadedAt: 2025-11-20 07:42:07.774353 +0000 UTC
 Check Bundle:
-  Digest: sha256:ff1f8aeb19a802446ed4125bd084f2d6f50ad6800328fee24a4bc2f5a03c23c1
-  DownloadedAt: 2026-02-18 07:19:46.599758 +0000 UTC
+  Digest: sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c
+  DownloadedAt: 2026-03-27 09:08:49.382908 +0000 UTC
 
 Report Summary
 
 ┌────────────┬────────────┬───────────────────┐
 │   Target   │    Type    │ Misconfigurations │
 ├────────────┼────────────┼───────────────────┤
-│ Dockerfile │ dockerfile │         3         │
+│ Dockerfile │ dockerfile │         1         │
 └────────────┴────────────┴───────────────────┘
 Legend:
 - '-': Not scanned
@@ -27,43 +27,15 @@ Legend:
 
 Dockerfile (dockerfile)
 =======================
-Tests: 28 (SUCCESSES: 25, FAILURES: 3)
-Failures: 3 (UNKNOWN: 0, LOW: 1, MEDIUM: 0, HIGH: 2, CRITICAL: 0)
-
-DS-0025 (HIGH): '--no-cache' is missed: apk add libressl-dev &&     addgroup -g 10001 -S app &&     adduser -u 10001 -D -S -G app -h /app app &&     chmod 700 /app &&     chown -R app:app /app
-═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-You should use 'apk add' with '--no-cache' to clean package cached data and reduce image size.
-
-See https://avd.aquasec.com/misconfig/ds-0025
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- Dockerfile:19-23
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  19 ┌ RUN apk add libressl-dev && \
-  20 │     addgroup -g 10001 -S app && \
-  21 │     adduser -u 10001 -D -S -G app -h /app app && \
-  22 │     chmod 700 /app && \
-  23 └     chown -R app:app /app
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
-
-DS-0025 (HIGH): '--no-cache' is missed: apk add musl-dev elfutils xz wget pkgconfig libressl-dev perl make upx mold
-═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
-You should use 'apk add' with '--no-cache' to clean package cached data and reduce image size.
-
-See https://avd.aquasec.com/misconfig/ds-0025
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
- Dockerfile:5
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-   5 [ RUN apk add musl-dev elfutils xz wget pkgconfig libressl-dev perl make upx mold
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-
+Tests: 27 (SUCCESSES: 26, FAILURES: 1)
+Failures: 1 (UNKNOWN: 0, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
 
 DS-0026 (LOW): Add HEALTHCHECK instruction in your Dockerfile
-═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 You should add HEALTHCHECK instruction in your docker container images to perform the health check on running containers.
 
 See https://avd.aquasec.com/misconfig/ds-0026
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 
@@ -72,9 +44,21 @@ Report Summary
 ┌───────────────────────────────────┬────────┬─────────────────┬─────────┐
 │              Target               │  Type  │ Vulnerabilities │ Secrets │
 ├───────────────────────────────────┼────────┼─────────────────┼─────────┤
-│ tinyops/kwp:0.1.0 (alpine 3.23.3) │ alpine │        0        │    -    │
+│ tinyops/kwp:0.7.1 (alpine 3.23.3) │ alpine │        1        │    -    │
 └───────────────────────────────────┴────────┴─────────────────┴─────────┘
 Legend:
 - '-': Not scanned
 - '0': Clean (no security findings detected)
 
+
+tinyops/kwp:0.7.1 (alpine 3.23.3)
+=================================
+Total: 1 (HIGH: 1, CRITICAL: 0)
+
+┌─────────┬────────────────┬──────────┬────────┬───────────────────┬───────────────┬─────────────────────────────────────────────────────────────┐
+│ Library │ Vulnerability  │ Severity │ Status │ Installed Version │ Fixed Version │                            Title                            │
+├─────────┼────────────────┼──────────┼────────┼───────────────────┼───────────────┼─────────────────────────────────────────────────────────────┤
+│ zlib    │ CVE-2026-22184 │ HIGH     │ fixed  │ 1.3.1-r2          │ 1.3.2-r0      │ zlib: zlib: Arbitrary code execution via buffer overflow in │
+│         │                │          │        │                   │               │ untgz utility                                               │
+│         │                │          │        │                   │               │ https://avd.aquasec.com/nvd/cve-2026-22184                  │
+└─────────┴────────────────┴──────────┴────────┴───────────────────┴───────────────┴─────────────────────────────────────────────────────────────┘
