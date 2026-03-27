@@ -17,7 +17,7 @@ COPY frontend/ ./
 
 RUN yarn build
 
-FROM rust:1.93.1-alpine3.23 AS app-build
+FROM rust:1.94.1-alpine3.23 AS app-build
 
 WORKDIR /build
 
