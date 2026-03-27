@@ -1,10 +1,11 @@
 <script lang="ts">
+    import type { Snippet } from "svelte";
     import { getToken, setToken } from "$lib/auth";
     import { Input } from "$lib/components/ui/input";
     import { Button } from "$lib/components/ui/button";
     import { toast } from "svelte-sonner";
 
-    let { children } = $props<{ children: any }>();
+    let { children }: { children: Snippet } = $props();
 
     let authenticated = $state(!!getToken());
     let tokenInput = $state("");

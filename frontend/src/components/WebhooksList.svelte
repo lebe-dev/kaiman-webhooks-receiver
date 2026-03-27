@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { SvelteSet } from "svelte/reactivity";
   import { deleteWebhook, listWebhooks, type WebhookItem } from "$lib/api";
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
@@ -8,8 +9,7 @@
 
   let webhooks = $state<WebhookItem[]>([]);
   let loading = $state(false);
-  let expandedHeaders = $state<Set<number>>(new Set());
-  let deleteConfirmId = $state<number | null>(null);
+  let expandedHeaders = new SvelteSet<number>();
   let deleting = $state(false);
 
   async function load() {
@@ -24,13 +24,11 @@
   }
 
   function toggleHeaders(id: number) {
-    const next = new Set(expandedHeaders);
-    if (next.has(id)) {
-      next.delete(id);
+    if (expandedHeaders.has(id)) {
+      expandedHeaders.delete(id);
     } else {
-      next.add(id);
+      expandedHeaders.add(id);
     }
-    expandedHeaders = next;
   }
 
   function formatDate(ts: number): string {
@@ -53,7 +51,6 @@
       await deleteWebhook(channel, id);
       webhooks = webhooks.filter((w) => w.id !== id);
       toast.success("Webhook deleted");
-      deleteConfirmId = null;
     } catch {
       toast.error("Failed to delete webhook");
     } finally {
@@ -62,8 +59,8 @@
   }
 
   $effect(() => {
-    channel;
-    expandedHeaders = new Set();
+    void channel;
+    expandedHeaders.clear();
     load();
   });
 </script>
@@ -125,7 +122,7 @@
 
           {#if expandedHeaders.has(wh.id)}
             <div class="text-xs font-mono bg-muted p-2 rounded overflow-x-auto">
-              {#each Object.entries(wh.headers) as [key, value]}
+              {#each Object.entries(wh.headers) as [key, value] (key)}
                 <div><span class="text-muted-foreground">{key}:</span> {value}</div>
               {/each}
             </div>

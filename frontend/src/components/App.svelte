@@ -15,7 +15,6 @@
     import { fetchConfig, type AppConfigResponse } from "$lib/api";
     import { clearToken } from "$lib/auth";
     import { version } from "../../package.json";
-    import { FailedToFetchRemoteImageDimensions } from "node_modules/astro/dist/core/errors/errors-data";
     import ThemeToggler from "./ThemeToggler.svelte";
 
     let config = $state<AppConfigResponse | null>(null);
@@ -52,8 +51,7 @@
 
 <Toaster />
 <TokenGate>
-    {#snippet children()}
-        <div class="p-6 max-w-5xl mx-auto">
+    <div class="p-6 max-w-5xl mx-auto">
             <div class="flex items-center justify-between mb-6">
                 <h1 class="text-xl font-semibold">
                     <div
@@ -145,5 +143,4 @@
                 </a>
             </footer>
         </div>
-    {/snippet}
 </TokenGate>
