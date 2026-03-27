@@ -8,12 +8,12 @@ COPY frontend/package.json frontend/yarn.lock ./
 RUN yarn
 
 COPY Cargo.toml ./Cargo.toml
+COPY frontend/ ./
+
 RUN VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2) && \
     jq --arg v "$VERSION" '.version = $v' package.json > package.json.tmp && \
     mv package.json.tmp package.json && \
     rm Cargo.toml
-
-COPY frontend/ ./
 
 RUN yarn build
 
