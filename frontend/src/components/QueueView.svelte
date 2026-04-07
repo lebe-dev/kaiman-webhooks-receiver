@@ -28,11 +28,17 @@
   let expanded = new SvelteSet<number>();
   let retrying = $state<number | null>(null);
 
-  async function load() {
-    loading = true;
+  let lastItemsJson = "";
+
+  async function load(silent = false) {
+    if (!silent) loading = true;
     try {
       const res = await fetchQueue(channel);
-      items = res.items;
+      const newJson = JSON.stringify(res.items);
+      if (newJson !== lastItemsJson) {
+        items = res.items;
+        lastItemsJson = newJson;
+      }
       status = res.status;
     } catch {
       toast.error("Failed to load queue");
@@ -122,11 +128,12 @@
   $effect(() => {
     void channel;
     expanded.clear();
+    lastItemsJson = "";
     load();
   });
 
   $effect(() => {
-    const interval = setInterval(load, 5000);
+    const interval = setInterval(() => load(true), 5000);
     return () => clearInterval(interval);
   });
 </script>
