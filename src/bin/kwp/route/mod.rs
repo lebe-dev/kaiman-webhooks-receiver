@@ -2,6 +2,7 @@ pub mod config;
 pub mod delete_webhook;
 pub mod list_webhooks;
 pub mod metrics;
+pub mod queue;
 pub mod read_webhooks;
 pub mod receive_webhook;
 pub mod sign_webhook;

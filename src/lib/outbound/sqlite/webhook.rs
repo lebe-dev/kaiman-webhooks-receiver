@@ -8,6 +8,31 @@ use crate::domain::webhook::ports::WebhookRepository;
 use super::init::Sqlite;
 use sqlx::Row;
 
+fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
+    let id: i64 = row.try_get("id").ok()?;
+    let channel: String = row.try_get("channel").ok()?;
+    let headers_str: String = row.try_get("headers").ok()?;
+    let payload: Vec<u8> = row.try_get("payload").ok()?;
+    let received_at: i64 = row.try_get("received_at").ok()?;
+    let forward_attempts: i64 = row.try_get("forward_attempts").ok()?;
+    let last_attempt_at: Option<i64> = row.try_get("last_attempt_at").ok()?;
+    let last_attempt_error: Option<String> = row.try_get("last_attempt_error").ok()?;
+
+    let headers: HashMap<String, String> =
+        serde_json::from_str(&headers_str).unwrap_or_default();
+
+    Some(Webhook {
+        id: Some(id),
+        channel: WebhookChannel::new(channel),
+        headers,
+        payload: Bytes::from(payload),
+        received_at,
+        forward_attempts,
+        last_attempt_at,
+        last_attempt_error,
+    })
+}
+
 impl WebhookRepository for Sqlite {
     async fn insert(&self, webhook: &Webhook) -> Result<(), WebhookRepositoryError> {
         let headers_json =
@@ -36,7 +61,7 @@ impl WebhookRepository for Sqlite {
             "DELETE FROM webhooks WHERE id IN (
                 SELECT id FROM webhooks WHERE channel = ?
                 ORDER BY received_at ASC LIMIT ?
-            ) RETURNING id, channel, headers, payload, received_at",
+            ) RETURNING id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error",
         )
         .bind(channel.as_str())
         .bind(limit)
@@ -44,27 +69,7 @@ impl WebhookRepository for Sqlite {
         .await
         .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
 
-        let webhooks = rows
-            .into_iter()
-            .filter_map(|row| {
-                let id: i64 = row.try_get("id").ok()?;
-                let channel: String = row.try_get("channel").ok()?;
-                let headers_str: String = row.try_get("headers").ok()?;
-                let payload: Vec<u8> = row.try_get("payload").ok()?;
-                let received_at: i64 = row.try_get("received_at").ok()?;
-
-                let headers: HashMap<String, String> =
-                    serde_json::from_str(&headers_str).unwrap_or_default();
-
-                Some(Webhook {
-                    id: Some(id),
-                    channel: WebhookChannel::new(channel),
-                    headers,
-                    payload: Bytes::from(payload),
-                    received_at,
-                })
-            })
-            .collect();
+        let webhooks = rows.iter().filter_map(parse_webhook_row).collect();
 
         Ok(webhooks)
     }
@@ -74,7 +79,7 @@ impl WebhookRepository for Sqlite {
         channel: &WebhookChannel,
     ) -> Result<Option<Webhook>, WebhookRepositoryError> {
         let row = sqlx::query(
-            "SELECT id, channel, headers, payload, received_at FROM webhooks
+            "SELECT id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error FROM webhooks
              WHERE channel = ? ORDER BY received_at ASC LIMIT 1",
         )
         .bind(channel.as_str())
@@ -82,24 +87,7 @@ impl WebhookRepository for Sqlite {
         .await
         .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
 
-        let webhook = row.and_then(|row| {
-            let id: i64 = row.try_get("id").ok()?;
-            let channel: String = row.try_get("channel").ok()?;
-            let headers_str: String = row.try_get("headers").ok()?;
-            let payload: Vec<u8> = row.try_get("payload").ok()?;
-            let received_at: i64 = row.try_get("received_at").ok()?;
-
-            let headers: HashMap<String, String> =
-                serde_json::from_str(&headers_str).unwrap_or_default();
-
-            Some(Webhook {
-                id: Some(id),
-                channel: WebhookChannel::new(channel),
-                headers,
-                payload: Bytes::from(payload),
-                received_at,
-            })
-        });
+        let webhook = row.as_ref().and_then(parse_webhook_row);
 
         Ok(webhook)
     }
@@ -109,7 +97,7 @@ impl WebhookRepository for Sqlite {
         channel: &WebhookChannel,
     ) -> Result<Vec<Webhook>, WebhookRepositoryError> {
         let rows = sqlx::query(
-            "SELECT id, channel, headers, payload, received_at FROM webhooks
+            "SELECT id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error FROM webhooks
              WHERE channel = ? ORDER BY received_at DESC",
         )
         .bind(channel.as_str())
@@ -117,27 +105,7 @@ impl WebhookRepository for Sqlite {
         .await
         .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
 
-        let webhooks = rows
-            .into_iter()
-            .filter_map(|row| {
-                let id: i64 = row.try_get("id").ok()?;
-                let channel: String = row.try_get("channel").ok()?;
-                let headers_str: String = row.try_get("headers").ok()?;
-                let payload: Vec<u8> = row.try_get("payload").ok()?;
-                let received_at: i64 = row.try_get("received_at").ok()?;
-
-                let headers: HashMap<String, String> =
-                    serde_json::from_str(&headers_str).unwrap_or_default();
-
-                Some(Webhook {
-                    id: Some(id),
-                    channel: WebhookChannel::new(channel),
-                    headers,
-                    payload: Bytes::from(payload),
-                    received_at,
-                })
-            })
-            .collect();
+        let webhooks = rows.iter().filter_map(parse_webhook_row).collect();
 
         Ok(webhooks)
     }
@@ -148,6 +116,110 @@ impl WebhookRepository for Sqlite {
             .execute(self.get_pool())
             .await
             .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        Ok(())
+    }
+
+    async fn increment_forward_attempts(
+        &self,
+        id: i64,
+        error_message: &str,
+    ) -> Result<(), WebhookRepositoryError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        sqlx::query(
+            "UPDATE webhooks SET forward_attempts = forward_attempts + 1, last_attempt_at = ?, last_attempt_error = ? WHERE id = ?",
+        )
+        .bind(now)
+        .bind(error_message)
+        .bind(id)
+        .execute(self.get_pool())
+        .await
+        .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        Ok(())
+    }
+
+    async fn count_by_channel(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<i64, WebhookRepositoryError> {
+        let row = sqlx::query("SELECT COUNT(*) as cnt FROM webhooks WHERE channel = ?")
+            .bind(channel.as_str())
+            .fetch_one(self.get_pool())
+            .await
+            .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        let count: i64 = row
+            .try_get("cnt")
+            .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        Ok(count)
+    }
+
+    async fn list_queue_by_channel(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<Vec<Webhook>, WebhookRepositoryError> {
+        let rows = sqlx::query(
+            "SELECT id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error FROM webhooks
+             WHERE channel = ? ORDER BY received_at ASC",
+        )
+        .bind(channel.as_str())
+        .fetch_all(self.get_pool())
+        .await
+        .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        let webhooks = rows.iter().filter_map(parse_webhook_row).collect();
+
+        Ok(webhooks)
+    }
+
+    async fn clear_by_channel(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<i64, WebhookRepositoryError> {
+        let result = sqlx::query("DELETE FROM webhooks WHERE channel = ?")
+            .bind(channel.as_str())
+            .execute(self.get_pool())
+            .await
+            .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        Ok(result.rows_affected() as i64)
+    }
+
+    async fn get_by_id(
+        &self,
+        id: i64,
+    ) -> Result<Option<Webhook>, WebhookRepositoryError> {
+        let row = sqlx::query(
+            "SELECT id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error FROM webhooks
+             WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(self.get_pool())
+        .await
+        .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
+
+        let webhook = row.as_ref().and_then(parse_webhook_row);
+
+        Ok(webhook)
+    }
+
+    async fn reset_forward_attempts(
+        &self,
+        id: i64,
+    ) -> Result<(), WebhookRepositoryError> {
+        sqlx::query(
+            "UPDATE webhooks SET forward_attempts = 0, last_attempt_at = NULL, last_attempt_error = NULL WHERE id = ?",
+        )
+        .bind(id)
+        .execute(self.get_pool())
+        .await
+        .map_err(|e| WebhookRepositoryError::Other(e.into()))?;
 
         Ok(())
     }
@@ -375,5 +447,200 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(b.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_increment_forward_attempts() {
+        let db = get_in_memory_db().await;
+
+        db.insert(&make_webhook("demo", b"{\"event\":\"push\"}", 1000))
+            .await
+            .unwrap();
+
+        let webhook = db
+            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap()
+            .unwrap();
+        let id = webhook.id.unwrap();
+
+        assert_eq!(webhook.forward_attempts, 0);
+        assert!(webhook.last_attempt_at.is_none());
+        assert!(webhook.last_attempt_error.is_none());
+
+        db.increment_forward_attempts(id, "connection refused")
+            .await
+            .unwrap();
+
+        let updated = db.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(updated.forward_attempts, 1);
+        assert!(updated.last_attempt_at.is_some());
+        assert_eq!(
+            updated.last_attempt_error.as_deref(),
+            Some("connection refused")
+        );
+
+        db.increment_forward_attempts(id, "timeout")
+            .await
+            .unwrap();
+
+        let updated2 = db.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(updated2.forward_attempts, 2);
+        assert_eq!(updated2.last_attempt_error.as_deref(), Some("timeout"));
+    }
+
+    #[tokio::test]
+    async fn test_count_by_channel() {
+        let db = get_in_memory_db().await;
+
+        let count = db
+            .count_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        for i in 1i64..=3 {
+            db.insert(&make_webhook("demo", b"{}", 1000 + i))
+                .await
+                .unwrap();
+        }
+        db.insert(&make_webhook("other", b"{}", 1000))
+            .await
+            .unwrap();
+
+        let count = db
+            .count_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap();
+        assert_eq!(count, 3);
+
+        let count_other = db
+            .count_by_channel(&WebhookChannel::new("other"))
+            .await
+            .unwrap();
+        assert_eq!(count_other, 1);
+    }
+
+    #[tokio::test]
+    async fn test_list_queue_by_channel_fifo_order() {
+        let db = get_in_memory_db().await;
+
+        for i in 1i64..=3 {
+            db.insert(&make_webhook(
+                "demo",
+                format!("{{\"seq\":{i}}}").as_bytes(),
+                1000 + i,
+            ))
+            .await
+            .unwrap();
+        }
+
+        let webhooks = db
+            .list_queue_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap();
+
+        assert_eq!(webhooks.len(), 3);
+        // FIFO: oldest first
+        assert_eq!(webhooks[0].received_at, 1001);
+        assert_eq!(webhooks[1].received_at, 1002);
+        assert_eq!(webhooks[2].received_at, 1003);
+    }
+
+    #[tokio::test]
+    async fn test_clear_by_channel() {
+        let db = get_in_memory_db().await;
+
+        for i in 1i64..=3 {
+            db.insert(&make_webhook("demo", b"{}", 1000 + i))
+                .await
+                .unwrap();
+        }
+        db.insert(&make_webhook("other", b"{}", 1000))
+            .await
+            .unwrap();
+
+        let deleted = db
+            .clear_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap();
+        assert_eq!(deleted, 3);
+
+        let count = db
+            .count_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap();
+        assert_eq!(count, 0);
+
+        // Other channel not affected
+        let count_other = db
+            .count_by_channel(&WebhookChannel::new("other"))
+            .await
+            .unwrap();
+        assert_eq!(count_other, 1);
+    }
+
+    #[tokio::test]
+    async fn test_get_by_id() {
+        let db = get_in_memory_db().await;
+
+        db.insert(&make_webhook("demo", b"{\"event\":\"push\"}", 1000))
+            .await
+            .unwrap();
+
+        let webhook = db
+            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap()
+            .unwrap();
+        let id = webhook.id.unwrap();
+
+        let fetched = db.get_by_id(id).await.unwrap();
+        assert!(fetched.is_some());
+        let fetched = fetched.unwrap();
+        assert_eq!(fetched.id, Some(id));
+        assert_eq!(fetched.channel.as_str(), "demo");
+        assert_eq!(fetched.payload, &b"{\"event\":\"push\"}"[..]);
+
+        // Non-existent id
+        let missing = db.get_by_id(9999).await.unwrap();
+        assert!(missing.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_reset_forward_attempts() {
+        let db = get_in_memory_db().await;
+
+        db.insert(&make_webhook("demo", b"{}", 1000))
+            .await
+            .unwrap();
+
+        let webhook = db
+            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .await
+            .unwrap()
+            .unwrap();
+        let id = webhook.id.unwrap();
+
+        // Increment first
+        db.increment_forward_attempts(id, "some error")
+            .await
+            .unwrap();
+        db.increment_forward_attempts(id, "another error")
+            .await
+            .unwrap();
+
+        let updated = db.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(updated.forward_attempts, 2);
+        assert!(updated.last_attempt_at.is_some());
+        assert!(updated.last_attempt_error.is_some());
+
+        // Reset
+        db.reset_forward_attempts(id).await.unwrap();
+
+        let reset = db.get_by_id(id).await.unwrap().unwrap();
+        assert_eq!(reset.forward_attempts, 0);
+        assert!(reset.last_attempt_at.is_none());
+        assert!(reset.last_attempt_error.is_none());
     }
 }

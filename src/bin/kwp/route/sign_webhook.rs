@@ -119,8 +119,9 @@ pub async fn sign_webhook_route(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::net::IpAddr;
-    use std::sync::Arc;
+    use std::sync::{Arc, RwLock};
 
     use axum::Router;
     use axum::body::Body;
@@ -191,6 +192,7 @@ mod tests {
             webhook_service: WebhookServiceImpl::new(db),
             metrics_handle: None,
             http_client: reqwest::Client::new(),
+            forward_statuses: Arc::new(RwLock::new(HashMap::new())),
         });
         let client_ip: IpAddr = "127.0.0.1".parse().unwrap();
         Router::new()

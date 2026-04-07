@@ -84,3 +84,72 @@ export async function deleteWebhook(
   });
   if (!res.ok) throw new Error(`Failed to delete webhook: ${res.status}`);
 }
+
+export interface ChannelForwardStatus {
+  paused: boolean;
+  queue_size: number;
+  last_success_at: number | null;
+  last_error_at: number | null;
+  last_error_message: string | null;
+}
+
+export interface QueueItem {
+  id: number;
+  headers: Record<string, string>;
+  payload: unknown;
+  received_at: number;
+  forward_attempts: number;
+  last_attempt_at: number | null;
+  last_attempt_error: string | null;
+}
+
+export interface QueueResponse {
+  status: ChannelForwardStatus;
+  items: QueueItem[];
+}
+
+export interface RetryResult {
+  success: boolean;
+  status_code: number | null;
+  body: string | null;
+  error: string | null;
+}
+
+export async function fetchQueue(channel: string): Promise<QueueResponse> {
+  const res = await apiFetch(`/api/webhook/${channel}/queue`);
+  if (!res.ok) throw new Error(`Failed to fetch queue: ${res.status}`);
+  return res.json();
+}
+
+export async function pauseForwarding(channel: string): Promise<void> {
+  const res = await apiFetch(`/api/webhook/${channel}/queue/pause`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to pause: ${res.status}`);
+}
+
+export async function resumeForwarding(channel: string): Promise<void> {
+  const res = await apiFetch(`/api/webhook/${channel}/queue/resume`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to resume: ${res.status}`);
+}
+
+export async function clearQueue(channel: string): Promise<void> {
+  const res = await apiFetch(`/api/webhook/${channel}/queue/clear`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`Failed to clear queue: ${res.status}`);
+}
+
+export async function retryWebhook(
+  channel: string,
+  webhookId: number
+): Promise<RetryResult> {
+  const res = await apiFetch(
+    `/api/webhook/${channel}/queue/retry/${webhookId}`,
+    { method: "POST" }
+  );
+  if (!res.ok) throw new Error(`Failed to retry: ${res.status}`);
+  return res.json();
+}

@@ -184,9 +184,9 @@ pub async fn receive_webhook_route(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
+    use std::collections::HashMap;
     use std::net::IpAddr;
+    use std::sync::{Arc, RwLock};
 
     use axum::{
         Extension, Router,
@@ -299,6 +299,7 @@ mod tests {
             webhook_service: WebhookServiceImpl::new(db),
             metrics_handle: None,
             http_client: reqwest::Client::new(),
+            forward_statuses: Arc::new(RwLock::new(HashMap::new())),
         });
         Router::new()
             .route("/api/webhook/{channel}", post(receive_webhook_route))

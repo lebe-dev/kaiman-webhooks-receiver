@@ -1,5 +1,6 @@
+use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use axum::{
     Router,
@@ -10,7 +11,7 @@ use axum::{
 use kwp_lib::VERSION;
 use kwp_lib::domain::config::model::AppConfig;
 use kwp_lib::domain::config::ports::AppConfigLoader;
-use kwp_lib::domain::webhook::model::WebhookChannel;
+use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
 use kwp_lib::domain::webhook::service::WebhookServiceImpl;
 use kwp_lib::outbound::config::EnvConfigLoader;
 use kwp_lib::outbound::sqlite::Sqlite;
@@ -18,9 +19,13 @@ use logger::get_logging_config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use route::{
     config::get_config_route, delete_webhook::delete_webhook_route,
-    list_webhooks::list_webhooks_route, metrics::metrics_route, read_webhooks::read_webhooks_route,
-    receive_webhook::receive_webhook_route, sign_webhook::sign_webhook_route,
-    test_send::test_send_route,
+    list_webhooks::list_webhooks_route, metrics::metrics_route,
+    queue::{
+        clear_queue_route, get_queue_route, pause_queue_route, resume_queue_route,
+        retry_webhook_route,
+    },
+    read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route,
+    sign_webhook::sign_webhook_route, test_send::test_send_route,
 };
 
 use crate::route::version::get_version_route;
@@ -38,6 +43,7 @@ pub struct AppState {
     pub webhook_service: WebhookServiceImpl<Sqlite>,
     pub metrics_handle: Option<PrometheusHandle>,
     pub http_client: reqwest::Client,
+    pub forward_statuses: Arc<RwLock<HashMap<String, ChannelForwardStatus>>>,
 }
 
 #[tokio::main]
@@ -62,12 +68,22 @@ async fn main() -> anyhow::Result<()> {
     let db = Sqlite::new(&app_config.db_cnn).await?;
 
     let http_client = reqwest::Client::new();
+    let forward_statuses = Arc::new(RwLock::new(HashMap::new()));
+    for channel_cfg in &app_config.channels {
+        if channel_cfg.forward.is_some() {
+            forward_statuses.write().unwrap().insert(
+                channel_cfg.name.clone(),
+                ChannelForwardStatus::new(),
+            );
+        }
+    }
     for channel_cfg in &app_config.channels {
         if let Some(forward_cfg) = channel_cfg.forward.clone() {
             let channel = WebhookChannel::new(channel_cfg.name.clone());
             let repo = db.clone();
             let client = http_client.clone();
             let ignored_headers = app_config.ignored_headers.clone();
+            let statuses = forward_statuses.clone();
 
             tokio::spawn(background::forward::run_forwarder(
                 channel,
@@ -76,6 +92,7 @@ async fn main() -> anyhow::Result<()> {
                 repo,
                 client,
                 ignored_headers,
+                statuses,
             ));
 
             log::info!(
@@ -103,6 +120,7 @@ async fn main() -> anyhow::Result<()> {
         webhook_service,
         metrics_handle,
         http_client: http_client.clone(),
+        forward_statuses: forward_statuses.clone(),
     });
 
     let mut app = Router::new();
@@ -116,7 +134,12 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/webhook/{channel}/list", get(list_webhooks_route))
             .route("/api/webhook/{channel}/{id}", delete(delete_webhook_route))
             .route("/api/webhook/{channel}/sign", post(sign_webhook_route))
-            .route("/api/webhook/{channel}/test-send", post(test_send_route));
+            .route("/api/webhook/{channel}/test-send", post(test_send_route))
+            .route("/api/webhook/{channel}/queue", get(get_queue_route))
+            .route("/api/webhook/{channel}/queue/pause", post(pause_queue_route))
+            .route("/api/webhook/{channel}/queue/resume", post(resume_queue_route))
+            .route("/api/webhook/{channel}/queue/clear", post(clear_queue_route))
+            .route("/api/webhook/{channel}/queue/retry/{id}", post(retry_webhook_route));
 
         if app_config.metrics_enabled {
             app = app.route("/api/metrics", get(metrics_route));

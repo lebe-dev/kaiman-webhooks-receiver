@@ -1,9 +1,9 @@
 Version: 0.69.1
 Vulnerability DB:
   Version: 2
-  UpdatedAt: 2026-03-19 12:35:06.232779536 +0000 UTC
-  NextUpdate: 2026-03-20 12:35:06.232779285 +0000 UTC
-  DownloadedAt: 2026-03-27 09:09:11.462031 +0000 UTC
+  UpdatedAt: 2026-04-07 00:48:25.465433275 +0000 UTC
+  NextUpdate: 2026-04-08 00:48:25.465433014 +0000 UTC
+  DownloadedAt: 2026-04-07 06:24:37.607615 +0000 UTC
 Java DB:
   Version: 1
   UpdatedAt: 2025-11-20 00:57:10.039747638 +0000 UTC
@@ -11,7 +11,7 @@ Java DB:
   DownloadedAt: 2025-11-20 07:42:07.774353 +0000 UTC
 Check Bundle:
   Digest: sha256:1583562f8b90ed2a071b99f0e5ffff6b57e4ceb6ca3e4796577b4e6a339eb74c
-  DownloadedAt: 2026-03-27 09:08:49.382908 +0000 UTC
+  DownloadedAt: 2026-04-07 06:24:21.998905 +0000 UTC
 
 Report Summary
 
@@ -31,11 +31,11 @@ Tests: 27 (SUCCESSES: 26, FAILURES: 1)
 Failures: 1 (UNKNOWN: 0, LOW: 1, MEDIUM: 0, HIGH: 0, CRITICAL: 0)
 
 DS-0026 (LOW): Add HEALTHCHECK instruction in your Dockerfile
-═══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
+══════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════════
 You should add HEALTHCHECK instruction in your docker container images to perform the health check on running containers.
 
 See https://avd.aquasec.com/misconfig/ds-0026
-───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
 
@@ -44,14 +44,14 @@ Report Summary
 ┌───────────────────────────────────┬────────┬─────────────────┬─────────┐
 │              Target               │  Type  │ Vulnerabilities │ Secrets │
 ├───────────────────────────────────┼────────┼─────────────────┼─────────┤
-│ tinyops/kwp:0.7.1 (alpine 3.23.3) │ alpine │        1        │    -    │
+│ tinyops/kwp:1.0.0 (alpine 3.23.3) │ alpine │        1        │    -    │
 └───────────────────────────────────┴────────┴─────────────────┴─────────┘
 Legend:
 - '-': Not scanned
 - '0': Clean (no security findings detected)
 
 
-tinyops/kwp:0.7.1 (alpine 3.23.3)
+tinyops/kwp:1.0.0 (alpine 3.23.3)
 =================================
 Total: 1 (HIGH: 1, CRITICAL: 0)
 

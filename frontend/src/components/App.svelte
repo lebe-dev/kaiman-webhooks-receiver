@@ -3,6 +3,7 @@
     import ChannelSelect from "./ChannelSelect.svelte";
     import WebhooksList from "./WebhooksList.svelte";
     import DebugSend from "./DebugSend.svelte";
+    import QueueView from "./QueueView.svelte";
     import {
         Tabs,
         TabsList,
@@ -10,7 +11,7 @@
         TabsContent,
     } from "$lib/components/ui/tabs";
     import { Toaster } from "$lib/components/ui/sonner";
-    import { FishingHook, Bug, LogOut } from "@lucide/svelte";
+    import { FishingHook, Bug, ListOrdered, LogOut } from "@lucide/svelte";
     import { Button } from "$lib/components/ui/button/index.js";
     import { fetchConfig, type AppConfigResponse } from "$lib/api";
     import { clearToken } from "$lib/auth";
@@ -27,16 +28,40 @@
         config?.channels.find((c) => c.name === selectedChannel) ?? null,
     );
 
+    let currentChannelHasForward = $derived(
+        currentChannelConfig?.hasForward ?? false,
+    );
+
+    $effect(() => {
+        if (activeTab === "queue" && !currentChannelHasForward) {
+            activeTab = "viewer";
+        }
+    });
+
+    const CHANNEL_STORAGE_KEY = "kwp:selectedChannel";
+
     async function loadConfig() {
         try {
             config = await fetchConfig();
             if (config.channels.length > 0) {
-                selectedChannel = config.channels[0].name;
+                const cached = localStorage.getItem(CHANNEL_STORAGE_KEY);
+                if (cached && config.channels.some((c) => c.name === cached)) {
+                    selectedChannel = cached;
+                } else {
+                    localStorage.removeItem(CHANNEL_STORAGE_KEY);
+                    selectedChannel = config.channels[0].name;
+                }
             }
         } catch {
             configError = true;
         }
     }
+
+    $effect(() => {
+        if (selectedChannel) {
+            localStorage.setItem(CHANNEL_STORAGE_KEY, selectedChannel);
+        }
+    });
 
     function logout() {
         clearToken();
@@ -107,6 +132,12 @@
                             <Bug class="w-4 h-4" />
                             Debug
                         </TabsTrigger>
+                        {#if currentChannelHasForward}
+                            <TabsTrigger value="queue">
+                                <ListOrdered class="w-4 h-4" />
+                                Queue
+                            </TabsTrigger>
+                        {/if}
                     </TabsList>
                     <TabsContent value="viewer">
                         {#if selectedChannel}
@@ -123,6 +154,11 @@
                                 channelConfig={currentChannelConfig}
                                 bind:payloadInput={debugPayload}
                             />
+                        {/if}
+                    </TabsContent>
+                    <TabsContent value="queue">
+                        {#if selectedChannel && currentChannelHasForward}
+                            <QueueView channel={selectedChannel} />
                         {/if}
                     </TabsContent>
                 </Tabs>

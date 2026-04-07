@@ -1,8 +1,10 @@
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use kwp_lib::domain::config::model::WebhookForwardConfig;
 use kwp_lib::domain::crypto;
-use kwp_lib::domain::webhook::model::WebhookChannel;
+use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
 use kwp_lib::domain::webhook::ports::WebhookRepository;
 
 fn inc_forward(channel: &WebhookChannel, status: &'static str) {
@@ -14,6 +16,25 @@ fn inc_forward(channel: &WebhookChannel, status: &'static str) {
     .increment(1);
 }
 
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+}
+
+fn update_status(
+    statuses: &Arc<RwLock<HashMap<String, ChannelForwardStatus>>>,
+    channel: &str,
+    f: impl FnOnce(&mut ChannelForwardStatus),
+) {
+    if let Ok(mut map) = statuses.write()
+        && let Some(status) = map.get_mut(channel)
+    {
+        f(status);
+    }
+}
+
 pub async fn run_forwarder<R: WebhookRepository>(
     channel: WebhookChannel,
     forward_cfg: WebhookForwardConfig,
@@ -21,10 +42,28 @@ pub async fn run_forwarder<R: WebhookRepository>(
     repo: R,
     http: reqwest::Client,
     ignored_headers: Vec<String>,
+    forward_statuses: Arc<RwLock<HashMap<String, ChannelForwardStatus>>>,
 ) {
     let interval = Duration::from_secs(forward_cfg.interval_seconds);
 
+    if let Ok(count) = repo.count_by_channel(&channel).await {
+        update_status(&forward_statuses, channel.as_str(), |s| {
+            s.queue_size = count;
+        });
+    }
+
     loop {
+        let paused = forward_statuses
+            .read()
+            .ok()
+            .and_then(|map| map.get(channel.as_str()).map(|s| s.paused))
+            .unwrap_or(false);
+
+        if paused {
+            tokio::time::sleep(interval).await;
+            continue;
+        }
+
         match repo.peek_oldest_by_channel(&channel).await {
             Err(e) => {
                 log::error!("[forwarder:{}] peek failed: {}", channel.as_str(), e);
@@ -36,6 +75,9 @@ pub async fn run_forwarder<R: WebhookRepository>(
                     "[forwarder:{}] no pending webhooks, sleeping",
                     channel.as_str()
                 );
+                update_status(&forward_statuses, channel.as_str(), |s| {
+                    s.queue_size = 0;
+                });
                 tokio::time::sleep(interval).await;
             }
             Ok(Some(webhook)) => {
@@ -124,6 +166,14 @@ pub async fn run_forwarder<R: WebhookRepository>(
                         }
                         log::warn!("[forwarder:{}] request failed: {}", channel.as_str(), cause);
                         inc_forward(&channel, "network_error");
+
+                        let error_msg = format!("network error: {cause}");
+                        let _ = repo.increment_forward_attempts(id, &error_msg).await;
+                        update_status(&forward_statuses, channel.as_str(), |s| {
+                            s.last_error_at = Some(now_unix());
+                            s.last_error_message = Some(error_msg.clone());
+                        });
+
                         tokio::time::sleep(interval).await;
                     }
                     Ok(resp) => {
@@ -144,6 +194,10 @@ pub async fn run_forwarder<R: WebhookRepository>(
                                     e
                                 );
                             }
+                            update_status(&forward_statuses, channel.as_str(), |s| {
+                                s.last_success_at = Some(now_unix());
+                                s.queue_size = (s.queue_size - 1).max(0);
+                            });
                         } else {
                             let body = resp
                                 .text()
@@ -163,6 +217,15 @@ pub async fn run_forwarder<R: WebhookRepository>(
                                 body_preview
                             );
                             inc_forward(&channel, "unexpected_status");
+
+                            let error_msg =
+                                format!("HTTP {}: {}", status.as_u16(), body_preview);
+                            let _ = repo.increment_forward_attempts(id, &error_msg).await;
+                            update_status(&forward_statuses, channel.as_str(), |s| {
+                                s.last_error_at = Some(now_unix());
+                                s.last_error_message = Some(error_msg.clone());
+                            });
+
                             tokio::time::sleep(interval).await;
                         }
                     }

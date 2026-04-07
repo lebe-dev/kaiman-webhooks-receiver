@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use bytes::Bytes;
 
 use super::model::{
-    DeleteWebhookError, ListWebhooksError, ReadWebhooksError, ReceiveWebhookError, Webhook,
-    WebhookChannel,
+    DeleteWebhookError, ListWebhooksError, QueueWebhooksError, ReadWebhooksError,
+    ReceiveWebhookError, Webhook, WebhookChannel,
 };
 use super::ports::WebhookRepository;
 
@@ -86,6 +86,80 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
             "Deleted webhook id={} for channel={}",
             webhook_id,
             channel.as_str()
+        );
+
+        Ok(())
+    }
+
+    pub async fn list_queue(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<Vec<Webhook>, QueueWebhooksError> {
+        let webhooks = self.repository.list_queue_by_channel(channel).await?;
+
+        log::debug!(
+            "Listed {} queued webhooks for channel={}",
+            webhooks.len(),
+            channel.as_str()
+        );
+
+        Ok(webhooks)
+    }
+
+    pub async fn count_queue(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<i64, QueueWebhooksError> {
+        let count = self.repository.count_by_channel(channel).await?;
+
+        log::debug!(
+            "Counted {} queued webhooks for channel={}",
+            count,
+            channel.as_str()
+        );
+
+        Ok(count)
+    }
+
+    pub async fn clear_queue(
+        &self,
+        channel: &WebhookChannel,
+    ) -> Result<i64, QueueWebhooksError> {
+        let deleted = self.repository.clear_by_channel(channel).await?;
+
+        log::debug!(
+            "Cleared {} webhooks from queue for channel={}",
+            deleted,
+            channel.as_str()
+        );
+
+        Ok(deleted)
+    }
+
+    pub async fn get_webhook(
+        &self,
+        id: i64,
+    ) -> Result<Option<Webhook>, QueueWebhooksError> {
+        let webhook = self.repository.get_by_id(id).await?;
+
+        log::debug!("Fetched webhook id={}, found={}", id, webhook.is_some());
+
+        Ok(webhook)
+    }
+
+    pub async fn increment_forward_attempts(
+        &self,
+        id: i64,
+        error_message: &str,
+    ) -> Result<(), QueueWebhooksError> {
+        self.repository
+            .increment_forward_attempts(id, error_message)
+            .await?;
+
+        log::debug!(
+            "Incremented forward attempts for webhook id={}, error={}",
+            id,
+            error_message
         );
 
         Ok(())

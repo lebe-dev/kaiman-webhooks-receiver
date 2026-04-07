@@ -77,7 +77,7 @@ deploy HOSTNAME:
 
 # RELEASE
 
-release-chart: cleanup && build-chart
+release-chart: build-chart
     rm -rf helm-repo
     git clone git@github.com:tinyops-ru/tinyops-ru.github.io.git helm-repo
     bash -euo pipefail -c '\

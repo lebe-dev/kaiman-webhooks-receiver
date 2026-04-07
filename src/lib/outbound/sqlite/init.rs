@@ -40,6 +40,18 @@ impl Sqlite {
         .execute(&pool)
         .await?;
 
+        for col in [
+            "ALTER TABLE webhooks ADD COLUMN forward_attempts INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE webhooks ADD COLUMN last_attempt_at INTEGER",
+            "ALTER TABLE webhooks ADD COLUMN last_attempt_error TEXT",
+        ] {
+            match sqlx::query(col).execute(&pool).await {
+                Ok(_) => {}
+                Err(e) if e.to_string().contains("duplicate column") => {}
+                Err(e) => return Err(e.into()),
+            }
+        }
+
         Ok(Sqlite { pool })
     }
 }

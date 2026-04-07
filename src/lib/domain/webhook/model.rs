@@ -24,6 +24,9 @@ pub struct Webhook {
     pub headers: HashMap<String, String>,
     pub payload: Bytes,
     pub received_at: i64,
+    pub forward_attempts: i64,
+    pub last_attempt_at: Option<i64>,
+    pub last_attempt_error: Option<String>,
 }
 
 impl Webhook {
@@ -39,6 +42,9 @@ impl Webhook {
             headers,
             payload,
             received_at,
+            forward_attempts: 0,
+            last_attempt_at: None,
+            last_attempt_error: None,
         }
     }
 }
@@ -71,4 +77,37 @@ pub enum ListWebhooksError {
 pub enum DeleteWebhookError {
     #[error(transparent)]
     RepositoryError(#[from] WebhookRepositoryError),
+}
+
+#[derive(Debug, Error)]
+pub enum QueueWebhooksError {
+    #[error(transparent)]
+    RepositoryError(#[from] WebhookRepositoryError),
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ChannelForwardStatus {
+    pub paused: bool,
+    pub queue_size: i64,
+    pub last_success_at: Option<i64>,
+    pub last_error_at: Option<i64>,
+    pub last_error_message: Option<String>,
+}
+
+impl Default for ChannelForwardStatus {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl ChannelForwardStatus {
+    pub fn new() -> Self {
+        Self {
+            paused: false,
+            queue_size: 0,
+            last_success_at: None,
+            last_error_at: None,
+            last_error_message: None,
+        }
+    }
 }
