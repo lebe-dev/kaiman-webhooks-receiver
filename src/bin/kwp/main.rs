@@ -31,6 +31,7 @@ use route::{
 use crate::route::version::get_version_route;
 
 pub mod background;
+pub mod http_client;
 pub mod logger;
 pub mod middleware;
 pub mod route;
@@ -67,7 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
     let db = Sqlite::new(&app_config.db_cnn).await?;
 
-    let http_client = reqwest::Client::new();
+    let http_client = http_client::build_http_client()?;
     let forward_statuses = Arc::new(RwLock::new(HashMap::new()));
     for channel_cfg in &app_config.channels {
         if channel_cfg.forward.is_some() {

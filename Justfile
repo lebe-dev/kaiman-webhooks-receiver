@@ -101,7 +101,7 @@ release-chart: build-chart
         git push'
     rm -rf helm-repo
 
-build-release-image: test
+build-release-image: test && lint
     docker build --progress=plain --platform=linux/amd64 -t {{ image }}:{{ version }} .
 
 release: build-release-image && trivy-save-reports

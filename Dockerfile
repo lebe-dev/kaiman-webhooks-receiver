@@ -21,7 +21,7 @@ FROM rust:1.97.1-alpine AS app-build
 
 WORKDIR /build
 
-RUN apk --no-cache add musl-dev elfutils xz wget pkgconfig libressl-dev perl make upx mold
+RUN apk --no-cache add musl-dev elfutils xz wget upx mold
 
 COPY Cargo.toml Cargo.lock /build/
 COPY .cargo /build/.cargo
@@ -38,7 +38,7 @@ FROM alpine:3.24
 
 WORKDIR /app
 
-RUN apk --no-cache add libressl-dev && \
+RUN apk --no-cache add ca-certificates && \
     addgroup -g 10001 -S app && \
     adduser -u 10001 -D -S -G app -h /app app && \
     mkdir /app/data && \

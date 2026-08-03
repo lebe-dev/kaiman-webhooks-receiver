@@ -195,7 +195,7 @@ mod tests {
             config,
             webhook_service: WebhookServiceImpl::new(db),
             metrics_handle: None,
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_client::build_http_client().unwrap(),
             forward_statuses: Arc::new(RwLock::new(HashMap::new())),
         });
         let client_ip: IpAddr = "127.0.0.1".parse().unwrap();

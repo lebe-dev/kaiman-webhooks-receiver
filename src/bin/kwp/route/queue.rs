@@ -562,7 +562,7 @@ mod tests {
             config,
             webhook_service,
             metrics_handle: None,
-            http_client: reqwest::Client::new(),
+            http_client: crate::http_client::build_http_client().unwrap(),
             forward_statuses: Arc::new(RwLock::new(forward_statuses_map)),
         });
 
