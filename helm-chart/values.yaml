@@ -194,6 +194,8 @@ envs:
   API_ENABLED: "1"
   # Trusted reverse proxy IPs/CIDRs (comma-separated). Leave unset to use direct connection IP.
   # TRUSTED_PROXIES: "10.0.0.0/8,172.16.0.0/12"
+  # Environment tag for Sentry events. Only used when secrets.envs.SENTRY_DSN is set.
+  # SENTRY_ENVIRONMENT: "production"
 
 # -- Raw YAML content for /app/config.yml — placed in a Secret and mounted into the container.
 # See config.yml-dist for full examples. Contains secrets (api-read-token, webhook-secret).
@@ -213,6 +215,8 @@ secrets:
   # Keys are exact env var names. Stored as stringData in the same Secret as config.yml.
   envs: {}
     # UI_ACCESS_TOKEN: "change-me"
+    # Sentry DSN. Leave unset to disable error reporting. See docs/MONITORING.md.
+    # SENTRY_DSN: "https://key@sentry.example.com/1"
 
 # -- Persistence for the SQLite data directory (/app/data).
 # Warning: ReadWriteOnce PVCs do not support replicaCount > 1 with most storage classes.

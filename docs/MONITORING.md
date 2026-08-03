@@ -335,3 +335,66 @@ increase(kwp_webhook_forward_total{status="ok"}[1h])
 # P95 webhook processing latency (if latency histograms are added in future)
 histogram_quantile(0.95, kwp_webhook_forward_duration_seconds_bucket)
 ```
+
+## Error Reporting (Sentry)
+
+Metrics tell you *that* something is failing; Sentry tells you *what* failed. Error
+reporting is **disabled by default** and enabled by a single environment variable:
+
+```
+SENTRY_DSN=https://<key>@<host>/<project>
+SENTRY_ENVIRONMENT=production
+```
+
+| Variable | Default | Description |
+|---|---|---|
+| `SENTRY_DSN` | — | Project DSN. Empty or absent — no client is initialized and nothing is sent. |
+| `SENTRY_ENVIRONMENT` | `production` (SDK default) | Environment tag on every event (`production`, `staging`, …). |
+
+An invalid DSN is reported on stderr at startup and reporting stays off — the service
+still starts. The release is reported as `kwp@<version>`.
+
+### What gets reported
+
+| Event | Level | Source |
+|---|---|---|
+| Panic (any thread, including background forwarders) | `fatal` | Panic hook |
+| Startup failure (bad config, unreachable DB, port in use) | `fatal` | `main` |
+| Every `500 Internal Server Error` (DB failure, template rendering) | `error` | `log::error!` |
+| DB failures in a channel forwarder (peek, delete, attempt bookkeeping) | `error` | `log::error!` |
+| A webhook still undelivered after 10 attempts (reported once) | `error` | `log::error!` |
+| A forwarder task that stopped unexpectedly | `error` | `log::error!` |
+
+Rejected requests (`401`, `403`, `404`, `413`, `415`, `422`) are **not** reported as
+events — on a public endpoint they are normal traffic. They are logged at `warn` level
+and attached to the next event as breadcrumbs; use
+`kwp_webhook_receive_total{status=...}` to alert on them.
+
+### How it works
+
+Reporting rides on the logger: log4rs is wrapped in a `SentryLogger`, so `error!`
+becomes an event, `warn!`/`info!` become breadcrumbs, and `debug!`/`trace!` stay local.
+No explicit capture calls are scattered through the code — anything logged as an error
+is reported.
+
+Each request runs in its own Sentry hub (`NewSentryLayer`), and
+`middleware/sentry_scope.rs` attaches the request context to it:
+
+- transaction name — `POST /api/webhook/telegram`
+- tag `channel` — parsed from the request path
+- user IP address — the resolved client IP (see `TRUSTED_PROXIES`)
+- request URL, method and headers
+
+Background forwarders get their own hub tagged with `component=forwarder` and the
+channel name.
+
+### What is never sent
+
+- **Webhook payloads.** Bodies are never attached to events.
+- **Secrets in headers.** Header values are redacted when the header name contains
+  `auth`, `cookie`, `key`, `password`, `secret`, `sign` or `token`, and additionally for
+  every `secret-header` / `sign-header` name from `config.yml` — those carry the plain
+  channel secret and their names are arbitrary.
+
+Client IP addresses **are** sent (as `user.ip_address`), together with redacted
+headers, so events can be traced back to a sender.

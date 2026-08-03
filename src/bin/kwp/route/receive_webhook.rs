@@ -53,7 +53,11 @@ pub async fn receive_webhook_route(
 
     if !channel_config.is_ip_allowed(&client_ip.0) {
         log::warn!("IP {} blocked for channel: '{}'", client_ip.0, channel_name);
-        inc_receive(&channel_name, "ip_blocked", channel_config.monitoring_metrics);
+        inc_receive(
+            &channel_name,
+            "ip_blocked",
+            channel_config.monitoring_metrics,
+        );
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
 
@@ -74,7 +78,11 @@ pub async fn receive_webhook_route(
             SecretType::HmacSha256 => {
                 let Some(raw) = provided_raw else {
                     log::warn!("missing secret header for channel: {}", channel_name);
-                    inc_receive(&channel_name, "unauthorized", channel_config.monitoring_metrics);
+                    inc_receive(
+                        &channel_name,
+                        "unauthorized",
+                        channel_config.monitoring_metrics,
+                    );
                     return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
                 };
                 let extract_tmpl = channel_config
@@ -106,7 +114,11 @@ pub async fn receive_webhook_route(
             log::debug!("webhook secret verified for channel: {}", channel_name);
         } else {
             log::warn!("invalid webhook secret for channel: {}", channel_name);
-            inc_receive(&channel_name, "unauthorized", channel_config.monitoring_metrics);
+            inc_receive(
+                &channel_name,
+                "unauthorized",
+                channel_config.monitoring_metrics,
+            );
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
     }

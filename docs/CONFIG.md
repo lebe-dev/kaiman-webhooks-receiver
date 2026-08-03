@@ -14,6 +14,8 @@ These variables can be set in a `.env` file or directly in your environment.
 | `DATA_PATH` | `./data` | Path to the directory where data is stored. |
 | `DATABASE_URL` | `sqlite://./data/kwp.db?mode=rwc` | Connection string for the SQLite database. |
 | `CONFIG_FILE` | `config.yml` | Path to the YAML configuration file. |
+| `SENTRY_DSN` | — | Sentry project DSN. Absent or empty disables error reporting. See [MONITORING.md](MONITORING.md#error-reporting-sentry). |
+| `SENTRY_ENVIRONMENT` | `production` | Environment tag attached to Sentry events (`production`, `staging`, …). Only used when `SENTRY_DSN` is set. |
 
 ## YAML Configuration (`config.yml`)
 

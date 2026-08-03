@@ -154,7 +154,10 @@ pub async fn pause_queue_route(
 
     let mut map = match state.forward_statuses.write() {
         Ok(m) => m,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
+        Err(e) => {
+            log::error!("forward statuses lock is poisoned: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
+        }
     };
 
     match map.get_mut(&channel_name) {
@@ -189,7 +192,10 @@ pub async fn resume_queue_route(
 
     let mut map = match state.forward_statuses.write() {
         Ok(m) => m,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response(),
+        Err(e) => {
+            log::error!("forward statuses lock is poisoned: {}", e);
+            return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
+        }
     };
 
     match map.get_mut(&channel_name) {
@@ -241,11 +247,7 @@ pub async fn clear_queue_route(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) => {
-            log::error!(
-                "Failed to clear queue for channel {}: {}",
-                channel_name,
-                e
-            );
+            log::error!("Failed to clear queue for channel {}: {}", channel_name, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
         }
     }
@@ -291,7 +293,7 @@ pub async fn retry_webhook_route(
                 StatusCode::BAD_REQUEST,
                 "Channel has no forward configuration",
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -338,6 +340,10 @@ pub async fn retry_webhook_route(
             .as_deref()
             .or(channel_cfg.webhook_secret.as_deref());
         let Some(sign_secret) = effective_secret else {
+            log::error!(
+                "channel '{}': sign-header configured but no sign-secret or webhook-secret available",
+                channel_name
+            );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "sign-header configured but no secret available",

@@ -3,8 +3,9 @@ use std::sync::OnceLock;
 /// Installs the ring crypto provider for rustls.
 ///
 /// `reqwest` is built with the `rustls-no-provider` feature, so the process-wide
-/// provider must be selected explicitly before the first TLS client is created.
-fn install_crypto_provider() {
+/// provider must be selected explicitly before the first TLS client is created —
+/// including the client the Sentry transport builds for itself.
+pub fn install_crypto_provider() {
     static INSTALLED: OnceLock<()> = OnceLock::new();
 
     INSTALLED.get_or_init(|| {

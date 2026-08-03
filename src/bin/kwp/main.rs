@@ -15,18 +15,23 @@ use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
 use kwp_lib::domain::webhook::service::WebhookServiceImpl;
 use kwp_lib::outbound::config::EnvConfigLoader;
 use kwp_lib::outbound::sqlite::Sqlite;
-use logger::get_logging_config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use route::{
-    config::get_config_route, delete_webhook::delete_webhook_route,
-    list_webhooks::list_webhooks_route, metrics::metrics_route,
+    config::get_config_route,
+    delete_webhook::delete_webhook_route,
+    list_webhooks::list_webhooks_route,
+    metrics::metrics_route,
     queue::{
         clear_queue_route, get_queue_route, pause_queue_route, resume_queue_route,
         retry_webhook_route,
     },
-    read_webhooks::read_webhooks_route, receive_webhook::receive_webhook_route,
-    sign_webhook::sign_webhook_route, test_send::test_send_route,
+    read_webhooks::read_webhooks_route,
+    receive_webhook::receive_webhook_route,
+    sign_webhook::sign_webhook_route,
+    test_send::test_send_route,
 };
+use sentry::SentryFutureExt;
+use sentry::integrations::tower::NewSentryLayer;
 
 use crate::route::version::get_version_route;
 
@@ -34,6 +39,7 @@ pub mod background;
 pub mod http_client;
 pub mod logger;
 pub mod middleware;
+pub mod observability;
 pub mod route;
 pub mod security_metrics;
 pub mod static_files;
@@ -51,6 +57,20 @@ pub struct AppState {
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
 
+    // Initialized before anything else so that startup failures are reported too.
+    // The guard must outlive the application: dropping it stops event delivery.
+    let _sentry_guard = observability::init();
+
+    let result = run().await;
+
+    if let Err(error) = &result {
+        observability::capture_fatal_error(error);
+    }
+
+    result
+}
+
+async fn run() -> anyhow::Result<()> {
     let config_loader = EnvConfigLoader;
     let app_config = config_loader.load()?;
     app_config
@@ -63,8 +83,19 @@ async fn main() -> anyhow::Result<()> {
         .validate_templates()
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let logging_config = get_logging_config(&app_config.log_level, &app_config.log_target);
-    log4rs::init_config(logging_config)?;
+    // Header names carrying secrets are channel-specific, so Sentry has to learn
+    // them before any request is served.
+    observability::init_sensitive_headers(&app_config.channels);
+
+    logger::init(
+        &app_config.log_level,
+        &app_config.log_target,
+        observability::is_enabled(),
+    )?;
+
+    if observability::is_enabled() {
+        log::info!("Sentry error reporting is enabled");
+    }
 
     let db = Sqlite::new(&app_config.db_cnn).await?;
 
@@ -72,10 +103,10 @@ async fn main() -> anyhow::Result<()> {
     let forward_statuses = Arc::new(RwLock::new(HashMap::new()));
     for channel_cfg in &app_config.channels {
         if channel_cfg.forward.is_some() {
-            forward_statuses.write().unwrap().insert(
-                channel_cfg.name.clone(),
-                ChannelForwardStatus::new(),
-            );
+            forward_statuses
+                .write()
+                .unwrap()
+                .insert(channel_cfg.name.clone(), ChannelForwardStatus::new());
         }
     }
     for channel_cfg in &app_config.channels {
@@ -86,7 +117,7 @@ async fn main() -> anyhow::Result<()> {
             let ignored_headers = app_config.ignored_headers.clone();
             let statuses = forward_statuses.clone();
 
-            tokio::spawn(background::forward::run_forwarder(
+            let forwarder = background::forward::run_forwarder(
                 channel,
                 forward_cfg,
                 channel_cfg.webhook_secret.clone(),
@@ -95,7 +126,25 @@ async fn main() -> anyhow::Result<()> {
                 client,
                 ignored_headers,
                 statuses,
-            ));
+            );
+
+            // The forwarder loop never returns on its own: if the task ends, deliveries
+            // for the channel have silently stopped and that has to be reported.
+            let hub = observability::task_hub("forwarder", &channel_cfg.name);
+            let watchdog_hub = hub.clone();
+            let channel_name = channel_cfg.name.clone();
+
+            tokio::spawn(
+                async move {
+                    match tokio::spawn(forwarder.bind_hub(hub)).await {
+                        Ok(()) => {
+                            log::error!("[forwarder:{channel_name}] task exited unexpectedly")
+                        }
+                        Err(e) => log::error!("[forwarder:{channel_name}] task terminated: {e}"),
+                    }
+                }
+                .bind_hub(watchdog_hub),
+            );
 
             log::info!(
                 "started forwarder for channel={} → {}",
@@ -138,10 +187,22 @@ async fn main() -> anyhow::Result<()> {
             .route("/api/webhook/{channel}/sign", post(sign_webhook_route))
             .route("/api/webhook/{channel}/test-send", post(test_send_route))
             .route("/api/webhook/{channel}/queue", get(get_queue_route))
-            .route("/api/webhook/{channel}/queue/pause", post(pause_queue_route))
-            .route("/api/webhook/{channel}/queue/resume", post(resume_queue_route))
-            .route("/api/webhook/{channel}/queue/clear", post(clear_queue_route))
-            .route("/api/webhook/{channel}/queue/retry/{id}", post(retry_webhook_route));
+            .route(
+                "/api/webhook/{channel}/queue/pause",
+                post(pause_queue_route),
+            )
+            .route(
+                "/api/webhook/{channel}/queue/resume",
+                post(resume_queue_route),
+            )
+            .route(
+                "/api/webhook/{channel}/queue/clear",
+                post(clear_queue_route),
+            )
+            .route(
+                "/api/webhook/{channel}/queue/retry/{id}",
+                post(retry_webhook_route),
+            );
 
         if app_config.metrics_enabled {
             app = app.route("/api/metrics", get(metrics_route));
@@ -157,12 +218,18 @@ async fn main() -> anyhow::Result<()> {
         log::info!("Web UI is disabled (UI_ENABLED=0)");
     }
 
+    // Layers are applied outside-in in reverse order: the Sentry hub is bound first,
+    // then the client IP is resolved, and only then the scope middleware reads it.
     let app = app
         .layer(DefaultBodyLimit::max(app_config.max_body_limit()))
+        .layer(axum::middleware::from_fn(
+            middleware::sentry_scope::middleware,
+        ))
         .layer(axum::middleware::from_fn(
             middleware::client_ip::ClientIpExtractor::middleware,
         ))
         .layer(axum::Extension(app_config.trusted_proxies.clone()))
+        .layer(NewSentryLayer::<axum::extract::Request>::new_from_top())
         .with_state(app_state);
 
     let listener = tokio::net::TcpListener::bind(&app_config.bind).await?;

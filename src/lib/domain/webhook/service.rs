@@ -106,10 +106,7 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
         Ok(webhooks)
     }
 
-    pub async fn count_queue(
-        &self,
-        channel: &WebhookChannel,
-    ) -> Result<i64, QueueWebhooksError> {
+    pub async fn count_queue(&self, channel: &WebhookChannel) -> Result<i64, QueueWebhooksError> {
         let count = self.repository.count_by_channel(channel).await?;
 
         log::debug!(
@@ -121,10 +118,7 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
         Ok(count)
     }
 
-    pub async fn clear_queue(
-        &self,
-        channel: &WebhookChannel,
-    ) -> Result<i64, QueueWebhooksError> {
+    pub async fn clear_queue(&self, channel: &WebhookChannel) -> Result<i64, QueueWebhooksError> {
         let deleted = self.repository.clear_by_channel(channel).await?;
 
         log::debug!(
@@ -136,10 +130,7 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
         Ok(deleted)
     }
 
-    pub async fn get_webhook(
-        &self,
-        id: i64,
-    ) -> Result<Option<Webhook>, QueueWebhooksError> {
+    pub async fn get_webhook(&self, id: i64) -> Result<Option<Webhook>, QueueWebhooksError> {
         let webhook = self.repository.get_by_id(id).await?;
 
         log::debug!("Fetched webhook id={}, found={}", id, webhook.is_some());

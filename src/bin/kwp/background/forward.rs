@@ -7,6 +7,11 @@ use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
 use kwp_lib::domain::webhook::ports::WebhookRepository;
 
+/// After this many consecutive failed attempts a single error-level record is
+/// emitted, so a permanently stuck webhook surfaces in Sentry without one event
+/// per retry.
+const STUCK_ATTEMPTS_THRESHOLD: i64 = 10;
+
 fn inc_forward(channel: &WebhookChannel, status: &'static str, enabled: bool) {
     if !enabled {
         return;
@@ -24,6 +29,40 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
+}
+
+/// Records a failed attempt and reports the webhook once it looks permanently stuck.
+async fn record_failed_attempt<R: WebhookRepository>(
+    repo: &R,
+    channel: &WebhookChannel,
+    id: i64,
+    attempts_before: i64,
+    error_msg: &str,
+) {
+    if let Err(e) = repo.increment_forward_attempts(id, error_msg).await {
+        log::error!(
+            "[forwarder:{}] failed to record attempt for id={}: {}",
+            channel.as_str(),
+            id,
+            e
+        );
+    }
+
+    if crossed_stuck_threshold(attempts_before) {
+        log::error!(
+            "[forwarder:{}] webhook id={} is still not delivered after {} attempts: {}",
+            channel.as_str(),
+            id,
+            STUCK_ATTEMPTS_THRESHOLD,
+            error_msg
+        );
+    }
+}
+
+/// True only for the attempt that crosses [`STUCK_ATTEMPTS_THRESHOLD`], so a stuck
+/// webhook produces one report instead of one per retry.
+fn crossed_stuck_threshold(attempts_before: i64) -> bool {
+    attempts_before + 1 == STUCK_ATTEMPTS_THRESHOLD
 }
 
 fn update_status(
@@ -173,7 +212,14 @@ pub async fn run_forwarder<R: WebhookRepository>(
                         inc_forward(&channel, "network_error", monitoring_metrics);
 
                         let error_msg = format!("network error: {cause}");
-                        let _ = repo.increment_forward_attempts(id, &error_msg).await;
+                        record_failed_attempt(
+                            &repo,
+                            &channel,
+                            id,
+                            webhook.forward_attempts,
+                            &error_msg,
+                        )
+                        .await;
                         update_status(&forward_statuses, channel.as_str(), |s| {
                             s.last_error_at = Some(now_unix());
                             s.last_error_message = Some(error_msg.clone());
@@ -223,9 +269,15 @@ pub async fn run_forwarder<R: WebhookRepository>(
                             );
                             inc_forward(&channel, "unexpected_status", monitoring_metrics);
 
-                            let error_msg =
-                                format!("HTTP {}: {}", status.as_u16(), body_preview);
-                            let _ = repo.increment_forward_attempts(id, &error_msg).await;
+                            let error_msg = format!("HTTP {}: {}", status.as_u16(), body_preview);
+                            record_failed_attempt(
+                                &repo,
+                                &channel,
+                                id,
+                                webhook.forward_attempts,
+                                &error_msg,
+                            )
+                            .await;
                             update_status(&forward_statuses, channel.as_str(), |s| {
                                 s.last_error_at = Some(now_unix());
                                 s.last_error_message = Some(error_msg.clone());
@@ -237,5 +289,27 @@ pub async fn run_forwarder<R: WebhookRepository>(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stuck_webhook_is_reported_once() {
+        let reported: Vec<i64> = (0..20).filter(|a| crossed_stuck_threshold(*a)).collect();
+
+        assert_eq!(
+            reported,
+            vec![STUCK_ATTEMPTS_THRESHOLD - 1],
+            "exactly one attempt out of a long retry run may report"
+        );
+    }
+
+    #[test]
+    fn early_attempts_are_not_reported() {
+        assert!(!crossed_stuck_threshold(0));
+        assert!(!crossed_stuck_threshold(1));
     }
 }

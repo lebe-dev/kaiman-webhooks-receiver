@@ -18,8 +18,7 @@ fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
     let last_attempt_at: Option<i64> = row.try_get("last_attempt_at").ok()?;
     let last_attempt_error: Option<String> = row.try_get("last_attempt_error").ok()?;
 
-    let headers: HashMap<String, String> =
-        serde_json::from_str(&headers_str).unwrap_or_default();
+    let headers: HashMap<String, String> = serde_json::from_str(&headers_str).unwrap_or_default();
 
     Some(Webhook {
         id: Some(id),
@@ -191,10 +190,7 @@ impl WebhookRepository for Sqlite {
         Ok(result.rows_affected() as i64)
     }
 
-    async fn get_by_id(
-        &self,
-        id: i64,
-    ) -> Result<Option<Webhook>, WebhookRepositoryError> {
+    async fn get_by_id(&self, id: i64) -> Result<Option<Webhook>, WebhookRepositoryError> {
         let row = sqlx::query(
             "SELECT id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error FROM webhooks
              WHERE id = ?",
@@ -209,10 +205,7 @@ impl WebhookRepository for Sqlite {
         Ok(webhook)
     }
 
-    async fn reset_forward_attempts(
-        &self,
-        id: i64,
-    ) -> Result<(), WebhookRepositoryError> {
+    async fn reset_forward_attempts(&self, id: i64) -> Result<(), WebhookRepositoryError> {
         sqlx::query(
             "UPDATE webhooks SET forward_attempts = 0, last_attempt_at = NULL, last_attempt_error = NULL WHERE id = ?",
         )
@@ -480,9 +473,7 @@ mod tests {
             Some("connection refused")
         );
 
-        db.increment_forward_attempts(id, "timeout")
-            .await
-            .unwrap();
+        db.increment_forward_attempts(id, "timeout").await.unwrap();
 
         let updated2 = db.get_by_id(id).await.unwrap().unwrap();
         assert_eq!(updated2.forward_attempts, 2);
@@ -611,9 +602,7 @@ mod tests {
     async fn test_reset_forward_attempts() {
         let db = get_in_memory_db().await;
 
-        db.insert(&make_webhook("demo", b"{}", 1000))
-            .await
-            .unwrap();
+        db.insert(&make_webhook("demo", b"{}", 1000)).await.unwrap();
 
         let webhook = db
             .peek_oldest_by_channel(&WebhookChannel::new("demo"))

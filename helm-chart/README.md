@@ -28,6 +28,7 @@ All application env vars are injected via a ConfigMap. Keys are exact env var na
 | `envs.IGNORED_HEADERS` | Comma-separated list of headers to strip when receiving/forwarding webhooks | `host,content-length,transfer-encoding,connection,content-type` |
 | `envs.DEFAULT_BODY_LIMIT` | Max request body size in bytes. Omit to use the app default (262144 = 256 KB) | _(unset)_ |
 | `envs.TRUSTED_PROXIES` | Comma-separated list of trusted reverse proxy IPs/CIDRs. When set, `X-Forwarded-For`/`X-Real-IP` headers are used for client IP resolution. Leave unset to always use the direct connection IP (safe default) | _(unset)_ |
+| `envs.SENTRY_ENVIRONMENT` | Environment tag on Sentry events. Only used when `secrets.envs.SENTRY_DSN` is set | _(unset)_ |
 
 ### Channels Config (`.config`)
 
@@ -53,6 +54,7 @@ Secret values are stored alongside `config.yml` in the same Kubernetes Secret. A
 | `secrets.annotations` | Annotations applied to the channels Secret | `{}` |
 | `secrets.envs` | Map of secret env vars injected into the container via `envFrom.secretRef`. Keys are exact env var names | `{}` |
 | `secrets.envs.UI_ACCESS_TOKEN` | Token required to access the embedded web UI | _(unset)_ |
+| `secrets.envs.SENTRY_DSN` | Sentry project DSN. Leave unset to disable error reporting — see [MONITORING.md](../docs/MONITORING.md#error-reporting-sentry) | _(unset)_ |
 
 ```yaml
 secrets:
