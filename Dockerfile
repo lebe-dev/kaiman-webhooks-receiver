@@ -1,4 +1,4 @@
-FROM node:25.9.0-alpine3.23 AS frontend-build
+FROM node:25-alpine AS frontend-build
 
 WORKDIR /build/frontend
 
@@ -17,7 +17,7 @@ RUN VERSION=$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2) && \
 
 RUN yarn build
 
-FROM rust:1.95.0-alpine3.23 AS app-build
+FROM rust:1.97.1-alpine AS app-build
 
 WORKDIR /build
 
@@ -34,7 +34,7 @@ RUN cargo build --bin kwp --release && \
     upx -9 --lzma target/release/kwp && \
     chmod +x target/release/kwp
 
-FROM alpine:3.23
+FROM alpine:3.24
 
 WORKDIR /app
 
