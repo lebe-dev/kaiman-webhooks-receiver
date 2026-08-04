@@ -1,10 +1,13 @@
 use std::collections::HashSet;
 use std::env;
+use std::fmt;
 use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::domain::config::model::{AppConfig, LoadAppConfigError, WebhookChannelConfig};
+use crate::domain::config::model::{
+    AppConfig, ForwardBackoffDefaults, LoadAppConfigError, WebhookChannelConfig,
+};
 use crate::domain::config::ports::AppConfigLoader;
 
 const DEFAULT_BODY_LIMIT_BYTES: usize = 262_144; // 256 KB
@@ -67,6 +70,19 @@ impl AppConfigLoader for EnvConfigLoader {
         let metrics_enabled =
             matches!(env::var("METRICS_ENABLED").as_deref(), Ok("1") | Ok("true"));
 
+        let backoff_defaults = ForwardBackoffDefaults::default();
+        let forward_backoff = ForwardBackoffDefaults {
+            multiplier: parsed_or_default(
+                "FORWARD_BACKOFF_MULTIPLIER",
+                backoff_defaults.multiplier,
+            ),
+            max_seconds: parsed_or_default(
+                "FORWARD_BACKOFF_MAX_SECONDS",
+                backoff_defaults.max_seconds,
+            ),
+            jitter: parsed_or_default("FORWARD_BACKOFF_JITTER", backoff_defaults.jitter),
+        };
+
         let trusted_proxies: Vec<String> = match env::var("TRUSTED_PROXIES") {
             Ok(val) => val
                 .split(',')
@@ -105,7 +121,26 @@ impl AppConfigLoader for EnvConfigLoader {
             ui_access_token: Some(ui_access_token),
             ui_enabled,
             api_enabled,
+            forward_backoff,
         })
+    }
+}
+
+/// Reads a numeric variable, falling back to `default` when it is unset or
+/// unparsable. Values that parse but make no sense are rejected later by
+/// `AppConfig::validate_forward_backoff`, which fails startup instead of
+/// silently substituting a default.
+fn parsed_or_default<T: std::str::FromStr + fmt::Display>(name: &str, default: T) -> T {
+    let Ok(raw) = env::var(name) else {
+        return default;
+    };
+
+    match raw.parse() {
+        Ok(value) => value,
+        Err(_) => {
+            log::warn!("invalid {name} value '{raw}', using default {default}");
+            default
+        }
     }
 }
 
@@ -432,6 +467,86 @@ mod tests {
             env::remove_var("DATABASE_URL");
             env::remove_var("CONFIG_FILE");
             env::remove_var("IGNORED_HEADERS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_forward_backoff_defaults_when_unset() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::set_var("IGNORED_HEADERS", "host");
+            env::remove_var("FORWARD_BACKOFF_MULTIPLIER");
+            env::remove_var("FORWARD_BACKOFF_MAX_SECONDS");
+            env::remove_var("FORWARD_BACKOFF_JITTER");
+        }
+
+        let config = EnvConfigLoader.load().unwrap();
+
+        assert_eq!(config.forward_backoff, ForwardBackoffDefaults::default());
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+            env::remove_var("IGNORED_HEADERS");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn test_forward_backoff_read_from_env() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::set_var("IGNORED_HEADERS", "host");
+            env::set_var("FORWARD_BACKOFF_MULTIPLIER", "1.5");
+            env::set_var("FORWARD_BACKOFF_MAX_SECONDS", "900");
+            env::set_var("FORWARD_BACKOFF_JITTER", "0.05");
+        }
+
+        let config = EnvConfigLoader.load().unwrap();
+
+        assert_eq!(config.forward_backoff.multiplier, 1.5);
+        assert_eq!(config.forward_backoff.max_seconds, 900);
+        assert_eq!(config.forward_backoff.jitter, 0.05);
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+            env::remove_var("IGNORED_HEADERS");
+            env::remove_var("FORWARD_BACKOFF_MULTIPLIER");
+            env::remove_var("FORWARD_BACKOFF_MAX_SECONDS");
+            env::remove_var("FORWARD_BACKOFF_JITTER");
+        }
+    }
+
+    /// Garbage in the environment must not stop the service — a warning plus the
+    /// default is enough, whereas a value that parses but is nonsensical is
+    /// rejected later by `validate_forward_backoff`.
+    #[test]
+    #[serial]
+    fn test_unparsable_forward_backoff_falls_back_to_default() {
+        unsafe {
+            env::set_var("DATABASE_URL", "sqlite:test.db");
+            env::set_var("CONFIG_FILE", test_config_path());
+            env::set_var("IGNORED_HEADERS", "host");
+            env::set_var("FORWARD_BACKOFF_MULTIPLIER", "two");
+            env::set_var("FORWARD_BACKOFF_MAX_SECONDS", "an hour");
+        }
+
+        let config = EnvConfigLoader.load().unwrap();
+        let defaults = ForwardBackoffDefaults::default();
+
+        assert_eq!(config.forward_backoff.multiplier, defaults.multiplier);
+        assert_eq!(config.forward_backoff.max_seconds, defaults.max_seconds);
+
+        unsafe {
+            env::remove_var("DATABASE_URL");
+            env::remove_var("CONFIG_FILE");
+            env::remove_var("IGNORED_HEADERS");
+            env::remove_var("FORWARD_BACKOFF_MULTIPLIER");
+            env::remove_var("FORWARD_BACKOFF_MAX_SECONDS");
         }
     }
 

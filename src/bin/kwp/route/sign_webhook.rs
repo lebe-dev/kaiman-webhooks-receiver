@@ -129,7 +129,9 @@ mod tests {
     use axum::routing::post;
     use tower::ServiceExt;
 
-    use kwp_lib::domain::config::model::{AppConfig, SecretType, WebhookChannelConfig};
+    use kwp_lib::domain::config::model::{
+        AppConfig, ForwardBackoffDefaults, SecretType, WebhookChannelConfig,
+    };
     use kwp_lib::domain::crypto;
     use kwp_lib::domain::webhook::service::WebhookServiceImpl;
     use kwp_lib::outbound::sqlite::Sqlite;
@@ -189,6 +191,7 @@ mod tests {
             ui_access_token: None,
             ui_enabled: true,
             api_enabled: true,
+            forward_backoff: ForwardBackoffDefaults::default(),
         };
         let db = Sqlite::new("sqlite::memory:").await.unwrap();
         let state = Arc::new(AppState {

@@ -1,5 +1,6 @@
 use std::fmt;
 use std::net::IpAddr;
+use std::time::Duration;
 
 use ipnet::IpNet;
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use subtle::ConstantTimeEq;
 use thiserror::Error;
 
 use crate::domain::crypto;
+use crate::domain::webhook::backoff::ForwardBackoff;
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -25,6 +27,39 @@ impl fmt::Display for SecretType {
     }
 }
 
+/// Process-wide backoff defaults, read from the environment. Channels inherit
+/// these unless they carry a `backoff:` block of their own.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForwardBackoffDefaults {
+    pub multiplier: f64,
+    pub max_seconds: u64,
+    pub jitter: f64,
+}
+
+impl Default for ForwardBackoffDefaults {
+    fn default() -> Self {
+        // Doubling from the channel's interval reaches an hour after ~7 failures,
+        // which is slow enough to stop hammering a dead target and fast enough
+        // that a target coming back is noticed within the hour. The jitter keeps
+        // several channels (or replicas) from retrying in lockstep.
+        Self {
+            multiplier: 2.0,
+            max_seconds: 3_600,
+            jitter: 0.2,
+        }
+    }
+}
+
+/// Per-channel overrides for [`ForwardBackoffDefaults`]. Absent fields fall back
+/// to the global default, so a channel can raise only what it cares about.
+#[derive(Clone, Debug, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub struct ForwardBackoffOverrides {
+    pub multiplier: Option<f64>,
+    pub max_seconds: Option<u64>,
+    pub jitter: Option<f64>,
+}
+
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct WebhookForwardConfig {
@@ -37,6 +72,23 @@ pub struct WebhookForwardConfig {
     pub sign_header: Option<String>,
     pub sign_secret: Option<String>,
     pub sign_template: Option<String>,
+    #[serde(default)]
+    pub backoff: Option<ForwardBackoffOverrides>,
+}
+
+impl WebhookForwardConfig {
+    /// Resolves the channel's retry schedule: `interval-seconds` is the first
+    /// delay, the rest comes from the channel's overrides or the global defaults.
+    pub fn backoff(&self, defaults: &ForwardBackoffDefaults) -> ForwardBackoff {
+        let overrides = self.backoff.clone().unwrap_or_default();
+
+        ForwardBackoff {
+            base: Duration::from_secs(self.interval_seconds),
+            multiplier: overrides.multiplier.unwrap_or(defaults.multiplier),
+            max: Duration::from_secs(overrides.max_seconds.unwrap_or(defaults.max_seconds)),
+            jitter: overrides.jitter.unwrap_or(defaults.jitter),
+        }
+    }
 }
 
 fn default_expected_status() -> u16 {
@@ -60,6 +112,7 @@ impl PartialEq for WebhookForwardConfig {
             && self.sign_header == other.sign_header
             && self.sign_secret == other.sign_secret
             && self.sign_template == other.sign_template
+            && self.backoff == other.backoff
     }
 }
 
@@ -68,7 +121,8 @@ impl fmt::Display for WebhookForwardConfig {
         write!(
             f,
             "WebhookForwardConfig {{ url: {}, interval_seconds: {}, expected_status: {}, \
-             timeout_seconds: {}, sign_header: {}, sign_secret: {}, sign_template: {} }}",
+             timeout_seconds: {}, sign_header: {}, sign_secret: {}, sign_template: {}, \
+             backoff: {:?} }}",
             self.url,
             self.interval_seconds,
             self.expected_status,
@@ -76,6 +130,7 @@ impl fmt::Display for WebhookForwardConfig {
             self.sign_header.as_ref().map(|_| "***").unwrap_or("None"),
             self.sign_secret.as_ref().map(|_| "***").unwrap_or("None"),
             self.sign_template.as_ref().map(|_| "***").unwrap_or("None"),
+            self.backoff,
         )
     }
 }
@@ -204,6 +259,7 @@ pub struct AppConfig {
     pub ui_access_token: Option<String>,
     pub ui_enabled: bool,
     pub api_enabled: bool,
+    pub forward_backoff: ForwardBackoffDefaults,
 }
 
 impl AppConfig {
@@ -335,6 +391,83 @@ impl AppConfig {
         }
         Ok(())
     }
+
+    /// Validates the retry schedule at startup, both the global defaults and every
+    /// channel that overrides them.
+    ///
+    /// A bad value here is not visible until a target starts failing, which is the
+    /// worst moment to discover it — hence fail-fast.
+    pub fn validate_forward_backoff(&self) -> Result<(), String> {
+        check_backoff_values(
+            "FORWARD_BACKOFF_*",
+            self.forward_backoff.multiplier,
+            self.forward_backoff.max_seconds,
+            self.forward_backoff.jitter,
+        )?;
+
+        for ch in &self.channels {
+            let Some(fwd) = &ch.forward else {
+                continue;
+            };
+
+            // A zero interval would make every delay zero, turning the forwarder
+            // into a busy loop against the target.
+            if fwd.interval_seconds == 0 {
+                return Err(format!(
+                    "channel '{}': interval-seconds must be at least 1",
+                    ch.name
+                ));
+            }
+
+            let backoff = fwd.backoff(&self.forward_backoff);
+            let max_seconds = backoff.max.as_secs();
+
+            check_backoff_values(
+                &format!("channel '{}'", ch.name),
+                backoff.multiplier,
+                max_seconds,
+                backoff.jitter,
+            )?;
+
+            if max_seconds < fwd.interval_seconds {
+                return Err(format!(
+                    "channel '{}': backoff max-seconds {} is below interval-seconds {}",
+                    ch.name, max_seconds, fwd.interval_seconds
+                ));
+            }
+        }
+
+        Ok(())
+    }
+}
+
+/// Shared by the global defaults and the per-channel resolved values, so both
+/// report the same rules. `subject` names whatever the caller is checking.
+fn check_backoff_values(
+    subject: &str,
+    multiplier: f64,
+    max_seconds: u64,
+    jitter: f64,
+) -> Result<(), String> {
+    // Below 1.0 the delay would shrink on every failure — the opposite of backing off.
+    if !multiplier.is_finite() || multiplier < 1.0 {
+        return Err(format!(
+            "{subject}: backoff multiplier {multiplier} must be a finite number >= 1.0"
+        ));
+    }
+
+    if max_seconds == 0 {
+        return Err(format!("{subject}: backoff max-seconds must be at least 1"));
+    }
+
+    // Above 1.0 the jitter could subtract more than the delay itself.
+    if !jitter.is_finite() || !(0.0..=1.0).contains(&jitter) {
+        return Err(format!(
+            "{subject}: backoff jitter {jitter} must be within [0.0, 1.0]"
+        ));
+    }
+
+    Ok(())
 }
 
 impl fmt::Display for AppConfig {
@@ -350,7 +483,8 @@ impl fmt::Display for AppConfig {
             f,
             "AppConfig {{ bind: {}, log_level: {}, log_target: {}, data_path: {}, \
              db_cnn: ***, channels: [{}], default_body_limit: {}, \
-             ignored_headers: {:?}, metrics_enabled: {}, trusted_proxies: {:?} }}",
+             ignored_headers: {:?}, metrics_enabled: {}, trusted_proxies: {:?}, \
+             forward_backoff: {:?} }}",
             self.bind,
             self.log_level,
             self.log_target,
@@ -360,6 +494,7 @@ impl fmt::Display for AppConfig {
             self.ignored_headers,
             self.metrics_enabled,
             self.trusted_proxies,
+            self.forward_backoff,
         )
     }
 }
@@ -467,6 +602,7 @@ mod tests {
             ui_access_token: None,
             ui_enabled: true,
             api_enabled: true,
+            forward_backoff: ForwardBackoffDefaults::default(),
         }
     }
 
@@ -774,6 +910,7 @@ sign-template: "sha256={{ signature }}"
             sign_header: Some("X-Sig".to_string()),
             sign_secret: None,
             sign_template: None,
+            backoff: None,
         });
         // No webhook_secret either → must error
         let config = make_app_config(262_144, vec![ch]);
@@ -792,6 +929,7 @@ sign-template: "sha256={{ signature }}"
             sign_header: Some("X-Sig".to_string()),
             sign_secret: None,
             sign_template: None,
+            backoff: None,
         });
         // webhook_secret present → allowed (will be used as fallback at runtime)
         let config = make_app_config(262_144, vec![ch]);
@@ -809,6 +947,7 @@ sign-template: "sha256={{ signature }}"
             sign_header: None,
             sign_secret: Some("sec".to_string()),
             sign_template: None,
+            backoff: None,
         });
         let config = make_app_config(262_144, vec![ch]);
         assert!(config.validate_templates().is_err());
@@ -825,6 +964,7 @@ sign-template: "sha256={{ signature }}"
             sign_header: Some("X-Sig".to_string()),
             sign_secret: Some("sec".to_string()),
             sign_template: Some("{{ unclosed".to_string()),
+            backoff: None,
         });
         let config = make_app_config(262_144, vec![ch]);
         assert!(config.validate_templates().is_err());
@@ -852,6 +992,7 @@ sign-template: "sha256={{ signature }}"
             sign_header: Some("X-Sig".to_string()),
             sign_secret: Some("super_secret".to_string()),
             sign_template: Some("sha256={{ signature }}".to_string()),
+            backoff: None,
         };
         let display = config.to_string();
         assert!(display.contains("https://example.com/hook"));
@@ -954,5 +1095,168 @@ monitoring-metrics: false
         assert!(display.contains("db_cnn: ***"));
         assert!(display.contains("ch1"));
         assert!(display.contains("ch2"));
+    }
+
+    fn make_forward(interval_seconds: u64) -> WebhookForwardConfig {
+        WebhookForwardConfig {
+            url: "https://example.com/hook".to_string(),
+            interval_seconds,
+            expected_status: 200,
+            timeout_seconds: 15,
+            sign_header: None,
+            sign_secret: None,
+            sign_template: None,
+            backoff: None,
+        }
+    }
+
+    fn make_channel_with_forward(forward: WebhookForwardConfig) -> WebhookChannelConfig {
+        let mut ch = make_channel("a", None);
+        ch.forward = Some(forward);
+        ch
+    }
+
+    #[test]
+    fn test_backoff_defaults_are_inherited() {
+        let defaults = ForwardBackoffDefaults::default();
+        let resolved = make_forward(30).backoff(&defaults);
+
+        assert_eq!(
+            resolved.base,
+            Duration::from_secs(30),
+            "the first retry has to stay at interval-seconds"
+        );
+        assert_eq!(resolved.multiplier, defaults.multiplier);
+        assert_eq!(resolved.max, Duration::from_secs(defaults.max_seconds));
+        assert_eq!(resolved.jitter, defaults.jitter);
+    }
+
+    #[test]
+    fn test_backoff_channel_overrides_win() {
+        let mut forward = make_forward(15);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            multiplier: Some(3.0),
+            max_seconds: Some(600),
+            jitter: Some(0.5),
+        });
+
+        let resolved = forward.backoff(&ForwardBackoffDefaults::default());
+
+        assert_eq!(resolved.multiplier, 3.0);
+        assert_eq!(resolved.max, Duration::from_secs(600));
+        assert_eq!(resolved.jitter, 0.5);
+    }
+
+    /// A channel that overrides one field must keep the global value for the rest.
+    #[test]
+    fn test_backoff_partial_override_falls_back_per_field() {
+        let defaults = ForwardBackoffDefaults::default();
+        let mut forward = make_forward(30);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            max_seconds: Some(120),
+            ..Default::default()
+        });
+
+        let resolved = forward.backoff(&defaults);
+
+        assert_eq!(resolved.max, Duration::from_secs(120));
+        assert_eq!(resolved.multiplier, defaults.multiplier);
+        assert_eq!(resolved.jitter, defaults.jitter);
+    }
+
+    #[test]
+    fn test_backoff_deserializes_from_yaml() {
+        let yaml = r#"
+url: https://example.com/hook
+interval-seconds: 30
+backoff:
+  multiplier: 1.5
+  max-seconds: 900
+  jitter: 0.1
+"#;
+        let cfg: WebhookForwardConfig = serde_yaml::from_str(yaml).unwrap();
+        let overrides = cfg.backoff.expect("backoff block must deserialize");
+
+        assert_eq!(overrides.multiplier, Some(1.5));
+        assert_eq!(overrides.max_seconds, Some(900));
+        assert_eq!(overrides.jitter, Some(0.1));
+    }
+
+    #[test]
+    fn test_validate_forward_backoff_accepts_defaults() {
+        let config = make_app_config(262_144, vec![make_channel_with_forward(make_forward(30))]);
+
+        assert!(config.validate_forward_backoff().is_ok());
+    }
+
+    /// Channels without forwarding have no retry schedule to check.
+    #[test]
+    fn test_validate_forward_backoff_ignores_channels_without_forward() {
+        let config = make_app_config(262_144, vec![make_channel("a", None)]);
+
+        assert!(config.validate_forward_backoff().is_ok());
+    }
+
+    #[test]
+    fn test_validate_forward_backoff_rejects_shrinking_multiplier() {
+        let mut forward = make_forward(30);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            multiplier: Some(0.5),
+            ..Default::default()
+        });
+        let config = make_app_config(262_144, vec![make_channel_with_forward(forward)]);
+
+        assert!(config.validate_forward_backoff().is_err());
+    }
+
+    #[test]
+    fn test_validate_forward_backoff_rejects_jitter_above_one() {
+        let mut forward = make_forward(30);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            jitter: Some(1.5),
+            ..Default::default()
+        });
+        let config = make_app_config(262_144, vec![make_channel_with_forward(forward)]);
+
+        assert!(config.validate_forward_backoff().is_err());
+    }
+
+    /// A ceiling below the interval would make the first retry *faster* than the
+    /// channel's own cadence, which is never what the operator meant.
+    #[test]
+    fn test_validate_forward_backoff_rejects_max_below_interval() {
+        let mut forward = make_forward(300);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            max_seconds: Some(60),
+            ..Default::default()
+        });
+        let config = make_app_config(262_144, vec![make_channel_with_forward(forward)]);
+
+        assert!(config.validate_forward_backoff().is_err());
+    }
+
+    #[test]
+    fn test_validate_forward_backoff_rejects_zero_interval() {
+        let config = make_app_config(262_144, vec![make_channel_with_forward(make_forward(0))]);
+
+        assert!(
+            config.validate_forward_backoff().is_err(),
+            "a zero interval would busy-loop against the target"
+        );
+    }
+
+    #[test]
+    fn test_validate_forward_backoff_rejects_bad_global_defaults() {
+        let mut config =
+            make_app_config(262_144, vec![make_channel_with_forward(make_forward(30))]);
+        config.forward_backoff.jitter = -0.1;
+
+        let error = config
+            .validate_forward_backoff()
+            .expect_err("a negative jitter must not start");
+        assert!(
+            error.contains("FORWARD_BACKOFF_"),
+            "the message must point at the environment variable, got: {error}"
+        );
     }
 }

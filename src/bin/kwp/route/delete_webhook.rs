@@ -98,7 +98,9 @@ mod tests {
     };
     use tower::ServiceExt;
 
-    use kwp_lib::domain::config::model::{AppConfig, SecretType, WebhookChannelConfig};
+    use kwp_lib::domain::config::model::{
+        AppConfig, ForwardBackoffDefaults, SecretType, WebhookChannelConfig,
+    };
     use kwp_lib::domain::webhook::service::WebhookServiceImpl;
     use kwp_lib::outbound::sqlite::Sqlite;
 
@@ -135,6 +137,7 @@ mod tests {
             default_body_limit: 1024,
             ui_enabled: true,
             api_enabled: true,
+            forward_backoff: ForwardBackoffDefaults::default(),
             ui_access_token: Some("ui-token".to_string()),
             ignored_headers: vec![],
             trusted_proxies: vec![],

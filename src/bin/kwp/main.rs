@@ -82,6 +82,9 @@ async fn run() -> anyhow::Result<()> {
     app_config
         .validate_templates()
         .map_err(|e| anyhow::anyhow!(e))?;
+    app_config
+        .validate_forward_backoff()
+        .map_err(|e| anyhow::anyhow!(e))?;
 
     // Header names carrying secrets are channel-specific, so Sentry has to learn
     // them before any request is served.
@@ -117,9 +120,12 @@ async fn run() -> anyhow::Result<()> {
             let ignored_headers = app_config.ignored_headers.clone();
             let statuses = forward_statuses.clone();
 
+            let backoff = forward_cfg.backoff(&app_config.forward_backoff);
+
             let forwarder = background::forward::run_forwarder(
                 channel,
                 forward_cfg,
+                backoff,
                 channel_cfg.webhook_secret.clone(),
                 channel_cfg.monitoring_metrics,
                 repo,

@@ -11,10 +11,13 @@ use super::retry::{LockRetryPolicy, retry_on_locked};
 
 /// Columns added after the initial release. Applied on startup for databases
 /// created by an earlier version.
-const ADDED_COLUMNS: [(&str, &str); 3] = [
+const ADDED_COLUMNS: [(&str, &str); 4] = [
     ("forward_attempts", "INTEGER NOT NULL DEFAULT 0"),
     ("last_attempt_at", "INTEGER"),
     ("last_attempt_error", "TEXT"),
+    // Unix timestamp the forwarder may try this webhook again; NULL means "now",
+    // which is what every row written before backoff existed reads as.
+    ("next_attempt_at", "INTEGER"),
 ];
 
 /// Connection settings for the SQLite adapter.

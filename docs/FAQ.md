@@ -25,8 +25,8 @@ Check detail [comparison](COMPARISON.md).
 Not exactly real-time, but close. Each channel with forwarding enabled gets a dedicated background loop that runs continuously:
 
 - **If there are pending webhooks in the queue**, the loop forwards them back-to-back with no delay between each successful delivery — so a burst of webhooks is processed as fast as the target URL responds.
-- **When the queue is empty**, the loop sleeps for `interval-seconds` (configured per channel, e.g. 30 s) before checking again.
-- **After a failed delivery** (network error or unexpected HTTP status), the loop also sleeps for `interval-seconds` before retrying.
+- **When nothing is due**, the loop sleeps for `interval-seconds` (configured per channel, e.g. 30 s) before checking again.
+- **After a failed delivery** (network error or unexpected HTTP status), the loop sleeps for `interval-seconds`, and the webhook that failed is retried on an exponential delay: one `interval-seconds` after the first failure, then doubling up to an hour. Later webhooks in the queue are not held up by it. See [Retry backoff](CONFIG.md#retry-backoff).
 
 In practice, the end-to-end latency is:
 

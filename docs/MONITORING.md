@@ -84,7 +84,8 @@ Counts outgoing forwarding attempts, labeled by channel and outcome.
 |---|---|
 | `ok` | Webhook forwarded successfully (target returned the expected HTTP status) |
 | `network_error` | HTTP request failed — timeout, DNS failure, or connection error |
-| `unexpected_status` | Target responded with a status code different from `expected-status` in config |
+| `unexpected_status` | Target responded with a status code different from `expected-status` in config, and retrying may still help (`408`, `429`, `5xx`, …) |
+| `client_error` | Target rejected the payload with a `4xx` other than `408`/`429`. The webhook stays queued but is retried only once per `FORWARD_BACKOFF_MAX_SECONDS` — see [CONFIG.md](CONFIG.md#retry-backoff) |
 | `internal_error` | Could not read from DB, serialize payload, or render sign template |
 
 ### `kwp_channel_security_config`
@@ -171,7 +172,7 @@ groups:
       - alert: KWPForwardingErrors
         expr: |
           (
-            rate(kwp_webhook_forward_total{status=~"network_error|unexpected_status|internal_error"}[5m])
+            rate(kwp_webhook_forward_total{status=~"network_error|unexpected_status|client_error|internal_error"}[5m])
             /
             rate(kwp_webhook_forward_total[5m]) > 0.2
           )

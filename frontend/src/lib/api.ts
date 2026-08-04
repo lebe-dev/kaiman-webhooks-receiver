@@ -93,6 +93,8 @@ export interface ChannelForwardStatus {
   last_success_at: number | null;
   last_error_at: number | null;
   last_error_message: string | null;
+  /** Soonest moment a queued webhook becomes due; null while one is due now. */
+  next_attempt_at: number | null;
 }
 
 export interface QueueItem {
@@ -103,6 +105,8 @@ export interface QueueItem {
   forward_attempts: number;
   last_attempt_at: number | null;
   last_attempt_error: string | null;
+  /** When the forwarder retries this webhook; null means it is due now. */
+  next_attempt_at: number | null;
 }
 
 export interface QueueResponse {

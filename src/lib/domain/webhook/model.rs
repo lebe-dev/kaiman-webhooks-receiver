@@ -27,6 +27,9 @@ pub struct Webhook {
     pub forward_attempts: i64,
     pub last_attempt_at: Option<i64>,
     pub last_attempt_error: Option<String>,
+    /// When the forwarder may try again, as a unix timestamp. `None` means the
+    /// webhook is due now — the state of a webhook that has never failed.
+    pub next_attempt_at: Option<i64>,
 }
 
 impl Webhook {
@@ -45,6 +48,7 @@ impl Webhook {
             forward_attempts: 0,
             last_attempt_at: None,
             last_attempt_error: None,
+            next_attempt_at: None,
         }
     }
 }
@@ -132,6 +136,9 @@ pub struct ChannelForwardStatus {
     pub last_success_at: Option<i64>,
     pub last_error_at: Option<i64>,
     pub last_error_message: Option<String>,
+    /// Earliest moment any queued webhook of this channel becomes due, so the UI
+    /// can explain a queue that sits still while the channel is not paused.
+    pub next_attempt_at: Option<i64>,
 }
 
 impl Default for ChannelForwardStatus {
@@ -148,6 +155,7 @@ impl ChannelForwardStatus {
             last_success_at: None,
             last_error_at: None,
             last_error_message: None,
+            next_attempt_at: None,
         }
     }
 }

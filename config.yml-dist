@@ -18,6 +18,10 @@ channels:
     #   interval-seconds: 30         # How often to check for pending webhooks
     #   expected-status: 200         # Default: 200. Delete webhook only on this status
     #   timeout-seconds: 15          # Default: 15. HTTP request timeout
+    #   backoff:                     # Optional: override the global retry schedule
+    #     multiplier: 2.0            # Default: FORWARD_BACKOFF_MULTIPLIER (2.0)
+    #     max-seconds: 3600          # Default: FORWARD_BACKOFF_MAX_SECONDS (3600)
+    #     jitter: 0.2                # Default: FORWARD_BACKOFF_JITTER (0.2)
 
   # GitHub channel example (HMAC-SHA256)
   - name: github

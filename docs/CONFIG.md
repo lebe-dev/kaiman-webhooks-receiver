@@ -14,6 +14,9 @@ These variables can be set in a `.env` file or directly in your environment.
 | `DATA_PATH` | `./data` | Path to the directory where data is stored. |
 | `DATABASE_URL` | `sqlite://./data/kwp.db?mode=rwc` | Connection string for the SQLite database. |
 | `CONFIG_FILE` | `config.yml` | Path to the YAML configuration file. |
+| `FORWARD_BACKOFF_MULTIPLIER` | `2.0` | Growth factor applied to the retry delay after each failed forwarding attempt. `1.0` keeps a fixed interval. Must be >= 1.0. |
+| `FORWARD_BACKOFF_MAX_SECONDS` | `3600` | Ceiling for a single retry delay. Retries never stop, they only become rare. |
+| `FORWARD_BACKOFF_JITTER` | `0.2` | Fraction the delay is randomly spread by (±20% by default), so channels and replicas do not retry in lockstep. Range `0.0`–`1.0`. |
 | `SENTRY_DSN` | — | Sentry project DSN. Absent or empty disables error reporting. See [MONITORING.md](MONITORING.md#error-reporting-sentry). |
 | `SENTRY_ENVIRONMENT` | `production` | Environment tag attached to Sentry events (`production`, `staging`, …). Only used when `SENTRY_DSN` is set. |
 
@@ -68,6 +71,7 @@ Available Tera filters: `replace`, `split`, `last`, `trim`, `lower`, `upper`.
 | `sign-header` | string | — | (Optional) Header name to attach the HMAC signature to outgoing requests. |
 | `sign-secret` | string | — | (Optional) Secret key for HMAC-SHA256 signing of outgoing requests. |
 | `sign-template` | string | `{{ signature }}` | Tera template to format the signature into the header value. Variable: `signature`. |
+| `backoff` | object | — | (Optional) Per-channel overrides for the retry schedule. See [Retry backoff](#retry-backoff). |
 
 > `sign-header` and `sign-secret` must be configured together.
 
@@ -110,6 +114,53 @@ channels:
   - name: open
     api-read-token: "token"
 ```
+
+### Retry backoff
+
+A webhook that cannot be delivered is retried with an exponential delay instead of
+every `interval-seconds` forever. The first retry still happens after one
+`interval-seconds`; each further failure multiplies the wait by
+`backoff-multiplier` up to `max-seconds`.
+
+With the defaults and `interval-seconds: 30`, the delays are 30s, 1m, 2m, 4m, 8m,
+16m, 32m, then 1h from then on (each spread by ±20% jitter).
+
+The delay is stored per webhook, so a webhook the target keeps rejecting does not
+hold up the ones queued behind it — the forwarder skips it and delivers the rest.
+Retries never stop: a target that comes back hours later still drains its queue.
+`GET /api/webhook/{channel}/queue` exposes each webhook's `next_attempt_at`, and
+the Web UI shows the countdown.
+
+| Field | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `multiplier` | float | `FORWARD_BACKOFF_MULTIPLIER` | Growth factor per failed attempt. Must be >= 1.0. |
+| `max-seconds` | integer | `FORWARD_BACKOFF_MAX_SECONDS` | Ceiling for a single delay. Must be >= `interval-seconds`. |
+| `jitter` | float | `FORWARD_BACKOFF_JITTER` | Fraction the delay is randomly spread by, `0.0`–`1.0`. |
+
+Absent fields fall back to the corresponding environment variable, so a channel can
+override only what it cares about. Invalid values fail startup rather than being
+discovered when a target goes down.
+
+```yaml
+channels:
+  - name: github
+    api-read-token: "token"
+    forward:
+      url: "https://target/hook"
+      interval-seconds: 30
+      backoff:
+        multiplier: 3.0      # 30s → 1m30s → 4m30s → …
+        max-seconds: 900     # never wait longer than 15 minutes
+        jitter: 0.1          # spread each delay by ±10%
+```
+
+#### Responses that change the schedule
+
+| Target response | Behaviour |
+| :--- | :--- |
+| `Retry-After: <seconds>` on any unexpected status | The requested delay is used instead of the computed one, capped at `max-seconds`. The HTTP-date form of the header is ignored. |
+| `4xx` other than `408` and `429` | Treated as a rejection of the payload itself: retrying quickly cannot help, so the webhook waits `max-seconds` between attempts. It stays in the queue and is delivered if the target is fixed. Counted as `status="client_error"` in the metrics. |
+| `408`, `429`, `5xx`, any other unexpected status, network errors | Normal exponential backoff. |
 
 ## Storage contention (SQLite locking)
 

@@ -138,18 +138,20 @@ impl<R: WebhookRepository> WebhookServiceImpl<R> {
         Ok(webhook)
     }
 
-    pub async fn increment_forward_attempts(
+    pub async fn record_forward_failure(
         &self,
         id: i64,
         error_message: &str,
+        next_attempt_at: i64,
     ) -> Result<(), QueueWebhooksError> {
         self.repository
-            .increment_forward_attempts(id, error_message)
+            .record_forward_failure(id, error_message, next_attempt_at)
             .await?;
 
         log::debug!(
-            "Incremented forward attempts for webhook id={}, error={}",
+            "Recorded forward failure for webhook id={}, next attempt at {}, error={}",
             id,
+            next_attempt_at,
             error_message
         );
 

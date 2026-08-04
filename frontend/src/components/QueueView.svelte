@@ -23,10 +23,14 @@
     last_success_at: null,
     last_error_at: null,
     last_error_message: null,
+    next_attempt_at: null,
   });
   let loading = $state(false);
   let expanded = new SvelteSet<number>();
   let retrying = $state<number | null>(null);
+  // Countdowns are derived from this rather than from Date.now() directly, so they
+  // keep ticking even when a poll brings back an unchanged queue.
+  let nowTs = $state(Math.floor(Date.now() / 1000));
 
   let lastItemsJson = "";
 
@@ -66,6 +70,16 @@
     if (diff < 3600) return `${Math.floor(diff / 60)}m ago`;
     if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`;
     return formatDate(ts);
+  }
+
+  /** Time left until a backoff delay expires, or null once it already has. */
+  function timeUntil(ts: number | null): string | null {
+    if (ts === null) return null;
+    const diff = ts - nowTs;
+    if (diff <= 0) return null;
+    if (diff < 60) return `${diff}s`;
+    if (diff < 3600) return `${Math.floor(diff / 60)}m ${diff % 60}s`;
+    return `${Math.floor(diff / 3600)}h ${Math.floor((diff % 3600) / 60)}m`;
   }
 
   async function handlePauseResume() {
@@ -133,7 +147,10 @@
   });
 
   $effect(() => {
-    const interval = setInterval(() => load(true), 5000);
+    const interval = setInterval(() => {
+      nowTs = Math.floor(Date.now() / 1000);
+      load(true);
+    }, 5000);
     return () => clearInterval(interval);
   });
 </script>
@@ -153,6 +170,11 @@
             <span class="w-2 h-2 rounded-full bg-yellow-500"></span>
             Paused
           </span>
+        {:else if timeUntil(status.next_attempt_at)}
+          <span class="inline-flex items-center gap-1.5 text-amber-600 dark:text-amber-400">
+            <span class="w-2 h-2 rounded-full bg-amber-500"></span>
+            Backing off
+          </span>
         {:else}
           <span class="inline-flex items-center gap-1.5 text-green-600 dark:text-green-400">
             <span class="w-2 h-2 rounded-full bg-green-500"></span>
@@ -160,6 +182,11 @@
           </span>
         {/if}
       </div>
+      {#if !status.paused && timeUntil(status.next_attempt_at)}
+        <div class="text-xs text-muted-foreground">
+          retry in {timeUntil(status.next_attempt_at)}
+        </div>
+      {/if}
     </div>
     <div class="rounded-lg border bg-card text-card-foreground shadow-card p-3 space-y-1">
       <div class="text-xs text-muted-foreground">Last success</div>
@@ -244,6 +271,11 @@
                 {#if item.last_attempt_error}
                   <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-400">
                     error
+                  </span>
+                {/if}
+                {#if timeUntil(item.next_attempt_at)}
+                  <span class="inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/30 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                    retry in {timeUntil(item.next_attempt_at)}
                   </span>
                 {/if}
               </div>

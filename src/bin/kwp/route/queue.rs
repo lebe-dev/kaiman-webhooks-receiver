@@ -12,8 +12,10 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::AppState;
+use kwp_lib::domain::config::model::WebhookForwardConfig;
 use kwp_lib::domain::crypto;
-use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
+use kwp_lib::domain::webhook::backoff::{self, FailureKind};
+use kwp_lib::domain::webhook::model::{ChannelForwardStatus, Webhook, WebhookChannel};
 
 fn extract_bearer(headers: &HeaderMap) -> Option<&str> {
     headers
@@ -53,6 +55,48 @@ fn now_unix() -> i64 {
         .as_secs() as i64
 }
 
+/// Applies the channel's backoff to a webhook whose manual retry failed.
+///
+/// Without this a failed manual retry would leave the webhook due immediately,
+/// undoing the delay the forwarder had already assigned to it.
+async fn record_manual_failure(
+    state: &AppState,
+    channel_name: &str,
+    webhook: &Webhook,
+    forward_cfg: &WebhookForwardConfig,
+    kind: FailureKind,
+    retry_after: Option<Duration>,
+    error_msg: &str,
+) {
+    let Some(webhook_id) = webhook.id else {
+        return;
+    };
+
+    let delay = backoff::next_delay(
+        &forward_cfg.backoff(&state.config.forward_backoff),
+        kind,
+        webhook.forward_attempts + 1,
+        retry_after,
+        backoff::clock_jitter_unit(),
+    );
+    let next_attempt_at = now_unix() + delay.as_secs() as i64;
+
+    if let Err(e) = state
+        .webhook_service
+        .record_forward_failure(webhook_id, error_msg, next_attempt_at)
+        .await
+    {
+        log::error!("failed to record attempt for webhook {webhook_id}: {e}");
+    }
+
+    if let Ok(mut map) = state.forward_statuses.write()
+        && let Some(status) = map.get_mut(channel_name)
+    {
+        status.last_error_at = Some(now_unix());
+        status.last_error_message = Some(error_msg.to_string());
+    }
+}
+
 #[derive(Serialize)]
 pub struct QueueItemDto {
     pub id: i64,
@@ -62,6 +106,8 @@ pub struct QueueItemDto {
     pub forward_attempts: i64,
     pub last_attempt_at: Option<i64>,
     pub last_attempt_error: Option<String>,
+    /// When the forwarder will try this webhook again; `null` means "due now".
+    pub next_attempt_at: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -124,6 +170,7 @@ pub async fn get_queue_route(
                 forward_attempts: w.forward_attempts,
                 last_attempt_at: w.last_attempt_at,
                 last_attempt_error: w.last_attempt_error,
+                next_attempt_at: w.next_attempt_at,
             })
         })
         .collect();
@@ -136,6 +183,14 @@ pub async fn get_queue_route(
         .unwrap_or_else(ChannelForwardStatus::new);
 
     status.queue_size = items.len() as i64;
+    // The in-memory status only tracks the forwarder's last attempt, so the soonest
+    // due time comes from the queue itself. It is only meaningful while every queued
+    // webhook waits: one webhook that is due now means the channel is not idle.
+    status.next_attempt_at = items
+        .iter()
+        .map(|item| item.next_attempt_at)
+        .collect::<Option<Vec<_>>>()
+        .and_then(|due_times| due_times.into_iter().min());
 
     (StatusCode::OK, Json(QueueResponse { status, items })).into_response()
 }
@@ -396,17 +451,16 @@ pub async fn retry_webhook_route(
             );
 
             let error_msg = format!("network error: {cause}");
-            let _ = state
-                .webhook_service
-                .increment_forward_attempts(webhook_id, &error_msg)
-                .await;
-
-            if let Ok(mut map) = state.forward_statuses.write()
-                && let Some(status) = map.get_mut(&channel_name)
-            {
-                status.last_error_at = Some(now_unix());
-                status.last_error_message = Some(error_msg.clone());
-            }
+            record_manual_failure(
+                &state,
+                &channel_name,
+                &webhook,
+                forward_cfg,
+                FailureKind::Transient,
+                None,
+                &error_msg,
+            )
+            .await;
 
             (
                 StatusCode::OK,
@@ -421,6 +475,12 @@ pub async fn retry_webhook_route(
         }
         Ok(resp) => {
             let status_code = resp.status().as_u16();
+            // Read before the body: consuming the response drops the headers.
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok())
+                .and_then(backoff::parse_retry_after);
             let body = resp
                 .text()
                 .await
@@ -466,17 +526,16 @@ pub async fn retry_webhook_route(
                     body
                 );
 
-                let _ = state
-                    .webhook_service
-                    .increment_forward_attempts(webhook_id, &error_msg)
-                    .await;
-
-                if let Ok(mut map) = state.forward_statuses.write()
-                    && let Some(status) = map.get_mut(&channel_name)
-                {
-                    status.last_error_at = Some(now_unix());
-                    status.last_error_message = Some(error_msg);
-                }
+                record_manual_failure(
+                    &state,
+                    &channel_name,
+                    &webhook,
+                    forward_cfg,
+                    backoff::classify_status(status_code),
+                    retry_after,
+                    &error_msg,
+                )
+                .await;
 
                 (
                     StatusCode::OK,
@@ -507,15 +566,16 @@ mod tests {
     use tower::ServiceExt;
 
     use kwp_lib::domain::config::model::{
-        AppConfig, SecretType, WebhookChannelConfig, WebhookForwardConfig,
+        AppConfig, ForwardBackoffDefaults, SecretType, WebhookChannelConfig, WebhookForwardConfig,
     };
-    use kwp_lib::domain::webhook::model::ChannelForwardStatus;
+    use kwp_lib::domain::webhook::model::{ChannelForwardStatus, WebhookChannel};
     use kwp_lib::domain::webhook::service::WebhookServiceImpl;
     use kwp_lib::outbound::sqlite::Sqlite;
+    use serde_json::Value;
 
     use crate::AppState;
     use crate::route::queue::{
-        clear_queue_route, get_queue_route, pause_queue_route, resume_queue_route,
+        clear_queue_route, get_queue_route, now_unix, pause_queue_route, resume_queue_route,
     };
 
     fn make_channel(name: &str) -> WebhookChannelConfig {
@@ -545,6 +605,7 @@ mod tests {
             sign_header: None,
             sign_secret: None,
             sign_template: None,
+            backoff: None,
         });
         ch
     }
@@ -570,6 +631,7 @@ mod tests {
             default_body_limit: 1024,
             ui_enabled: true,
             api_enabled: true,
+            forward_backoff: ForwardBackoffDefaults::default(),
             ui_access_token: Some("ui-token".to_string()),
             ignored_headers: vec![],
             trusted_proxies: vec![],
@@ -761,5 +823,83 @@ mod tests {
 
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    async fn fetch_queue(app: Router) -> Value {
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/webhook/test/queue")
+            .header(http::header::AUTHORIZATION, "Bearer ui-token")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+
+        serde_json::from_slice(&body).unwrap()
+    }
+
+    /// The UI has to be able to explain a queue that sits still: every item carries
+    /// its own due time, and the channel status carries the soonest one.
+    #[tokio::test]
+    async fn test_queue_reports_the_pending_retry_delay() {
+        let (app, state) = build_app(vec![make_channel_with_forward("test")]).await;
+        let channel = WebhookChannel::new("test");
+
+        state
+            .webhook_service
+            .receive_webhook(channel.clone(), HashMap::new(), "{}".into())
+            .await
+            .unwrap();
+
+        let queued = state.webhook_service.list_queue(&channel).await.unwrap();
+        let id = queued[0].id.unwrap();
+        let due_at = now_unix() + 600;
+        state
+            .webhook_service
+            .record_forward_failure(id, "HTTP 500: boom", due_at)
+            .await
+            .unwrap();
+
+        let body = fetch_queue(app).await;
+
+        assert_eq!(body["items"][0]["next_attempt_at"], due_at);
+        assert_eq!(body["items"][0]["forward_attempts"], 1);
+        assert_eq!(
+            body["status"]["next_attempt_at"], due_at,
+            "a queue where everything waits must report when it resumes"
+        );
+    }
+
+    /// One webhook that is due now means the channel is not waiting, however long
+    /// the others have been parked for.
+    #[tokio::test]
+    async fn test_queue_status_has_no_delay_while_a_webhook_is_due() {
+        let (app, state) = build_app(vec![make_channel_with_forward("test")]).await;
+        let channel = WebhookChannel::new("test");
+
+        for _ in 0..2 {
+            state
+                .webhook_service
+                .receive_webhook(channel.clone(), HashMap::new(), "{}".into())
+                .await
+                .unwrap();
+        }
+
+        let queued = state.webhook_service.list_queue(&channel).await.unwrap();
+        state
+            .webhook_service
+            .record_forward_failure(queued[0].id.unwrap(), "HTTP 500: boom", now_unix() + 600)
+            .await
+            .unwrap();
+
+        let body = fetch_queue(app).await;
+
+        assert!(body["status"]["next_attempt_at"].is_null());
+        assert!(body["items"][1]["next_attempt_at"].is_null());
     }
 }

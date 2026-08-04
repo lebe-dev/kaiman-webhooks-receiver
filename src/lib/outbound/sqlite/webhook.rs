@@ -10,7 +10,7 @@ use super::retry::is_lock_contention;
 use sqlx::Row;
 
 /// Columns selected wherever a full [`Webhook`] is read back.
-const WEBHOOK_COLUMNS: &str = "id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error";
+const WEBHOOK_COLUMNS: &str = "id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error, next_attempt_at";
 
 fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
     let id: i64 = row.try_get("id").ok()?;
@@ -21,6 +21,7 @@ fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
     let forward_attempts: i64 = row.try_get("forward_attempts").ok()?;
     let last_attempt_at: Option<i64> = row.try_get("last_attempt_at").ok()?;
     let last_attempt_error: Option<String> = row.try_get("last_attempt_error").ok()?;
+    let next_attempt_at: Option<i64> = row.try_get("next_attempt_at").ok()?;
 
     let headers: HashMap<String, String> = serde_json::from_str(&headers_str).unwrap_or_default();
 
@@ -33,6 +34,7 @@ fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
         forward_attempts,
         last_attempt_at,
         last_attempt_error,
+        next_attempt_at,
     })
 }
 
@@ -94,19 +96,24 @@ impl WebhookRepository for Sqlite {
         Ok(webhooks)
     }
 
-    async fn peek_oldest_by_channel(
+    async fn peek_oldest_due_by_channel(
         &self,
         channel: &WebhookChannel,
+        now: i64,
     ) -> Result<Option<Webhook>, WebhookRepositoryError> {
+        // `next_attempt_at IS NULL` covers both a webhook that never failed and any
+        // row written before the column existed.
         let statement = format!(
             "SELECT {WEBHOOK_COLUMNS} FROM webhooks
-             WHERE channel = ? ORDER BY received_at ASC LIMIT 1"
+             WHERE channel = ? AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+             ORDER BY received_at ASC LIMIT 1"
         );
 
         let row = self
-            .with_lock_retry("peek_oldest_by_channel", || {
+            .with_lock_retry("peek_oldest_due_by_channel", || {
                 sqlx::query(&statement)
                     .bind(channel.as_str())
+                    .bind(now)
                     .fetch_optional(self.get_pool())
             })
             .await
@@ -152,22 +159,24 @@ impl WebhookRepository for Sqlite {
         Ok(())
     }
 
-    async fn increment_forward_attempts(
+    async fn record_forward_failure(
         &self,
         id: i64,
         error_message: &str,
+        next_attempt_at: i64,
     ) -> Result<(), WebhookRepositoryError> {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs() as i64;
 
-        self.with_lock_retry("increment_forward_attempts", || {
+        self.with_lock_retry("record_forward_failure", || {
             sqlx::query(
-                "UPDATE webhooks SET forward_attempts = forward_attempts + 1, last_attempt_at = ?, last_attempt_error = ? WHERE id = ?",
+                "UPDATE webhooks SET forward_attempts = forward_attempts + 1, last_attempt_at = ?, last_attempt_error = ?, next_attempt_at = ? WHERE id = ?",
             )
             .bind(now)
             .bind(error_message)
+            .bind(next_attempt_at)
             .bind(id)
             .execute(self.get_pool())
         })
@@ -252,7 +261,7 @@ impl WebhookRepository for Sqlite {
     async fn reset_forward_attempts(&self, id: i64) -> Result<(), WebhookRepositoryError> {
         self.with_lock_retry("reset_forward_attempts", || {
             sqlx::query(
-                "UPDATE webhooks SET forward_attempts = 0, last_attempt_at = NULL, last_attempt_error = NULL WHERE id = ?",
+                "UPDATE webhooks SET forward_attempts = 0, last_attempt_at = NULL, last_attempt_error = NULL, next_attempt_at = NULL WHERE id = ?",
             )
             .bind(id)
             .execute(self.get_pool())
@@ -272,6 +281,10 @@ mod tests {
     use crate::outbound::sqlite::test_support::{WriteLock, fast_tuning, no_retry_tuning, temp_db};
     use std::collections::HashSet;
     use std::time::{Duration, Instant};
+
+    /// Any timestamp far past every `received_at` used in these tests, so a peek
+    /// sees every webhook that is not deliberately parked in the future.
+    const NOW: i64 = 1_000_000;
 
     async fn get_in_memory_db() -> Sqlite {
         Sqlite::new("sqlite::memory:").await.unwrap()
@@ -312,7 +325,7 @@ mod tests {
         db.insert(&webhook).await.unwrap();
 
         let peeked = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
@@ -336,7 +349,7 @@ mod tests {
         }
 
         let peeked = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
@@ -349,7 +362,7 @@ mod tests {
         let db = get_in_memory_db().await;
 
         let result = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap();
 
@@ -365,7 +378,7 @@ mod tests {
             .unwrap();
 
         let peeked = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
@@ -374,7 +387,7 @@ mod tests {
         db.delete_by_id(id).await.unwrap();
 
         let after = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap();
 
@@ -493,7 +506,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_increment_forward_attempts() {
+    async fn test_record_forward_failure() {
         let db = get_in_memory_db().await;
 
         db.insert(&make_webhook("demo", b"{\"event\":\"push\"}", 1000))
@@ -501,7 +514,7 @@ mod tests {
             .unwrap();
 
         let webhook = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
@@ -510,8 +523,12 @@ mod tests {
         assert_eq!(webhook.forward_attempts, 0);
         assert!(webhook.last_attempt_at.is_none());
         assert!(webhook.last_attempt_error.is_none());
+        assert!(
+            webhook.next_attempt_at.is_none(),
+            "a webhook that never failed is due immediately"
+        );
 
-        db.increment_forward_attempts(id, "connection refused")
+        db.record_forward_failure(id, "connection refused", NOW + 30)
             .await
             .unwrap();
 
@@ -522,12 +539,117 @@ mod tests {
             updated.last_attempt_error.as_deref(),
             Some("connection refused")
         );
+        assert_eq!(updated.next_attempt_at, Some(NOW + 30));
 
-        db.increment_forward_attempts(id, "timeout").await.unwrap();
+        db.record_forward_failure(id, "timeout", NOW + 60)
+            .await
+            .unwrap();
 
         let updated2 = db.get_by_id(id).await.unwrap().unwrap();
         assert_eq!(updated2.forward_attempts, 2);
         assert_eq!(updated2.last_attempt_error.as_deref(), Some("timeout"));
+        assert_eq!(updated2.next_attempt_at, Some(NOW + 60));
+    }
+
+    #[tokio::test]
+    async fn test_peek_skips_a_webhook_that_is_not_due_yet() {
+        let db = get_in_memory_db().await;
+        let channel = WebhookChannel::new("demo");
+
+        db.insert(&make_webhook("demo", b"{\"seq\":1}", 1000))
+            .await
+            .unwrap();
+
+        let first = db
+            .peek_oldest_due_by_channel(&channel, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        db.record_forward_failure(first.id.unwrap(), "boom", NOW + 60)
+            .await
+            .unwrap();
+
+        assert!(
+            db.peek_oldest_due_by_channel(&channel, NOW)
+                .await
+                .unwrap()
+                .is_none(),
+            "a parked webhook must not be handed out before its time"
+        );
+
+        assert_eq!(
+            db.peek_oldest_due_by_channel(&channel, NOW + 60)
+                .await
+                .unwrap()
+                .and_then(|w| w.id),
+            first.id,
+            "it must come back once the delay has passed"
+        );
+    }
+
+    /// The whole point of a per-webhook delay: the queue keeps moving while the
+    /// webhook at its head is undeliverable.
+    #[tokio::test]
+    async fn test_a_parked_webhook_does_not_block_the_queue() {
+        let db = get_in_memory_db().await;
+        let channel = WebhookChannel::new("demo");
+
+        db.insert(&make_webhook("demo", b"{\"seq\":1}", 1000))
+            .await
+            .unwrap();
+        db.insert(&make_webhook("demo", b"{\"seq\":2}", 1001))
+            .await
+            .unwrap();
+
+        let head = db
+            .peek_oldest_due_by_channel(&channel, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(head.payload, &b"{\"seq\":1}"[..]);
+
+        db.record_forward_failure(head.id.unwrap(), "rejected", NOW + 3600)
+            .await
+            .unwrap();
+
+        let next = db
+            .peek_oldest_due_by_channel(&channel, NOW)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(next.payload, &b"{\"seq\":2}"[..]);
+    }
+
+    /// Clearing the attempt bookkeeping has to release the delay too, otherwise a
+    /// manual reset would leave the webhook parked.
+    #[tokio::test]
+    async fn test_reset_clears_the_delay() {
+        let db = get_in_memory_db().await;
+        let channel = WebhookChannel::new("demo");
+
+        db.insert(&make_webhook("demo", b"{}", 1000)).await.unwrap();
+        let id = db
+            .peek_oldest_due_by_channel(&channel, NOW)
+            .await
+            .unwrap()
+            .unwrap()
+            .id
+            .unwrap();
+
+        db.record_forward_failure(id, "boom", NOW + 3600)
+            .await
+            .unwrap();
+        db.reset_forward_attempts(id).await.unwrap();
+
+        let reset = db.get_by_id(id).await.unwrap().unwrap();
+        assert!(reset.next_attempt_at.is_none());
+        assert!(
+            db.peek_oldest_due_by_channel(&channel, NOW)
+                .await
+                .unwrap()
+                .is_some(),
+            "a reset webhook must be due again"
+        );
     }
 
     #[tokio::test]
@@ -630,7 +752,7 @@ mod tests {
             .unwrap();
 
         let webhook = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
@@ -655,17 +777,17 @@ mod tests {
         db.insert(&make_webhook("demo", b"{}", 1000)).await.unwrap();
 
         let webhook = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap();
         let id = webhook.id.unwrap();
 
         // Increment first
-        db.increment_forward_attempts(id, "some error")
+        db.record_forward_failure(id, "some error", NOW + 30)
             .await
             .unwrap();
-        db.increment_forward_attempts(id, "another error")
+        db.record_forward_failure(id, "another error", NOW + 60)
             .await
             .unwrap();
 
@@ -776,7 +898,7 @@ mod tests {
 
         db.insert(&make_webhook("demo", b"{}", 1000)).await.unwrap();
         let id = db
-            .peek_oldest_by_channel(&WebhookChannel::new("demo"))
+            .peek_oldest_due_by_channel(&WebhookChannel::new("demo"), NOW)
             .await
             .unwrap()
             .unwrap()
@@ -787,9 +909,9 @@ mod tests {
         let hold = Duration::from_millis(150);
 
         WriteLock::acquire(&url).await.release_after(hold);
-        db.increment_forward_attempts(id, "boom")
+        db.record_forward_failure(id, "boom", NOW + 30)
             .await
-            .expect("increment_forward_attempts must retry");
+            .expect("record_forward_failure must retry");
 
         WriteLock::acquire(&url).await.release_after(hold);
         db.reset_forward_attempts(id)
@@ -810,7 +932,7 @@ mod tests {
 
         db.insert(&make_webhook("demo", b"{}", 1002)).await.unwrap();
         let id = db
-            .peek_oldest_by_channel(&channel)
+            .peek_oldest_due_by_channel(&channel, NOW)
             .await
             .unwrap()
             .unwrap()
@@ -877,7 +999,12 @@ mod tests {
         assert_eq!(db.count_by_channel(&channel).await.unwrap(), 5);
         assert_eq!(db.list_by_channel(&channel).await.unwrap().len(), 5);
         assert_eq!(db.list_queue_by_channel(&channel).await.unwrap().len(), 5);
-        assert!(db.peek_oldest_by_channel(&channel).await.unwrap().is_some());
+        assert!(
+            db.peek_oldest_due_by_channel(&channel, NOW)
+                .await
+                .unwrap()
+                .is_some()
+        );
         let elapsed = started.elapsed();
 
         assert!(
