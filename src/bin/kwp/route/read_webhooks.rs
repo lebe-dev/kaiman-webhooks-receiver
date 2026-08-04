@@ -12,6 +12,7 @@ use serde_json::Value;
 
 use crate::AppState;
 use crate::middleware::client_ip::ClientIp;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::webhook::model::WebhookChannel;
 
 #[derive(Serialize)]
@@ -24,15 +25,16 @@ pub struct WebhookDto {
 pub async fn read_webhooks_route(
     State(state): State<Arc<AppState>>,
     Extension(client_ip): Extension<ClientIp>,
+    Extension(request_id): Extension<RequestId>,
     headers: HeaderMap,
     Path(channel_name): Path<String>,
 ) -> impl IntoResponse {
     log::debug!(
-        "read webhooks request from {} for channel: {}",
+        "[req:{}] read webhooks request from {} for channel: {}",
+        request_id,
         client_ip.0,
         channel_name
     );
-    log::info!("request to read webhooks for channel: {}", channel_name);
 
     let bearer = headers
         .get("Authorization")
@@ -43,7 +45,8 @@ pub async fn read_webhooks_route(
         Some(b) => b,
         None => {
             log::warn!(
-                "missing or invalid Authorization header for channel: {}",
+                "[req:{}] missing or invalid Authorization header for channel: {}",
+                request_id,
                 channel_name
             );
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -54,7 +57,8 @@ pub async fn read_webhooks_route(
         Some(c) => {
             if c.name != channel_name {
                 log::warn!(
-                    "token for channel: {} was used to attempt access to channel: {}",
+                    "[req:{}] token for channel: {} was used to attempt access to channel: {}",
+                    request_id,
                     c.name,
                     channel_name
                 );
@@ -63,7 +67,11 @@ pub async fn read_webhooks_route(
         }
         None => {
             if !state.config.is_ui_token(bearer) {
-                log::warn!("invalid token provided for channel: {}", channel_name);
+                log::warn!(
+                    "[req:{}] invalid token provided for channel: {}",
+                    request_id,
+                    channel_name
+                );
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
             }
             if state.config.find_channel_by_name(&channel_name).is_none() {
@@ -81,7 +89,8 @@ pub async fn read_webhooks_route(
     {
         Ok(webhooks) => {
             log::info!(
-                "successfully read {} webhooks for channel: {}",
+                "[req:{}] successfully read {} webhooks for channel: {}",
+                request_id,
                 webhooks.len(),
                 channel_name
             );
@@ -97,11 +106,21 @@ pub async fn read_webhooks_route(
         }
         // Nothing was deleted, so the client can safely poll again.
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy reading webhooks for {}: {}", channel_name, e);
+            log::warn!(
+                "[req:{}] storage busy reading webhooks for {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             crate::route::storage_busy_response()
         }
         Err(e) => {
-            log::error!("Failed to read webhooks: {}", e);
+            log::error!(
+                "[req:{}] failed to read webhooks for channel {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
         }
     }

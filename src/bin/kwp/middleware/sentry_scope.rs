@@ -1,24 +1,31 @@
 use axum::{extract::Request, middleware::Next, response::Response};
 
 use crate::middleware::client_ip::ClientIp;
+use crate::middleware::request_id::RequestId;
 use crate::observability;
 
-/// Attaches request context (method, URL, redacted headers, client IP, channel) to
-/// the Sentry scope, so any error reported while handling the request carries it.
+/// Attaches request context (method, URL, redacted headers, client IP, request id,
+/// channel) to the Sentry scope, so any error reported while handling the request
+/// carries it.
 ///
-/// Must run inside [`crate::middleware::client_ip::ClientIpExtractor::middleware`] —
-/// the client IP is read from the request extensions it inserts.
+/// Must run inside [`crate::middleware::client_ip::ClientIpExtractor::middleware`]
+/// and [`crate::middleware::request_id::middleware`] — both values are read from
+/// the request extensions those insert. The request id is what ties a Sentry event
+/// back to the log records of the same request.
 pub async fn middleware(request: Request, next: Next) -> Response {
     if !observability::is_enabled() {
         return next.run(request).await;
     }
 
     if let Some(ClientIp(client_ip)) = request.extensions().get::<ClientIp>().cloned() {
+        let request_id = request.extensions().get::<RequestId>().cloned();
+
         observability::set_request_scope(
             request.method(),
             request.uri(),
             client_ip,
             request.headers(),
+            request_id.as_ref().map(RequestId::as_str),
         );
     }
 
@@ -40,13 +47,16 @@ mod tests {
     use std::net::IpAddr;
     use tower::ServiceExt;
 
-    /// Same layer order as `main.rs`: the per-request hub is bound outside, the scope
-    /// middleware runs inside it.
+    /// Same layer order as `main.rs`: the per-request hub is bound outside, the id is
+    /// assigned next, and the scope middleware runs inside both.
     fn router() -> Router {
         Router::new()
             .route("/api/webhook/{channel}", post(failing_handler))
             .route("/api/config", get(failing_handler))
             .layer(axum::middleware::from_fn(middleware))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::request_id::middleware,
+            ))
             .layer(NewSentryLayer::<Request>::new_from_top())
     }
 
@@ -115,6 +125,14 @@ mod tests {
             event.user.as_ref().unwrap().ip_address,
             Some(IpAddress::Exact("203.0.113.7".parse().unwrap()))
         );
+
+        // The value is random; what matters is that the event can be joined to the
+        // log records of the same request at all.
+        let request_id = event
+            .tags
+            .get("request_id")
+            .expect("an event must be traceable back to the request log");
+        assert!(request_id.chars().all(|c| c.is_ascii_hexdigit()));
 
         let request = event.request.as_ref().expect("request context is attached");
         assert_eq!(request.method.as_deref(), Some("POST"));

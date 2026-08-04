@@ -12,20 +12,53 @@ use sqlx::Row;
 /// Columns selected wherever a full [`Webhook`] is read back.
 const WEBHOOK_COLUMNS: &str = "id, channel, headers, payload, received_at, forward_attempts, last_attempt_at, last_attempt_error, next_attempt_at";
 
+/// Reads a row, reporting rather than hiding a row it cannot read.
+///
+/// A row only becomes unreadable through schema drift or corruption, and the
+/// consequences of dropping one silently are severe: an unreadable *oldest* row
+/// makes [`WebhookRepository::peek_oldest_due_by_channel`] answer "nothing is due"
+/// forever, which stops the channel without a single record explaining why.
+///
+/// Reported at warning level because a caller reads the same row on every pass —
+/// an error would raise a Sentry event per forwarder tick. The one case that is
+/// unrecoverable, a row dropped by a destructive read, is escalated by that caller.
 fn parse_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Option<Webhook> {
-    let id: i64 = row.try_get("id").ok()?;
-    let channel: String = row.try_get("channel").ok()?;
-    let headers_str: String = row.try_get("headers").ok()?;
-    let payload: Vec<u8> = row.try_get("payload").ok()?;
-    let received_at: i64 = row.try_get("received_at").ok()?;
-    let forward_attempts: i64 = row.try_get("forward_attempts").ok()?;
-    let last_attempt_at: Option<i64> = row.try_get("last_attempt_at").ok()?;
-    let last_attempt_error: Option<String> = row.try_get("last_attempt_error").ok()?;
-    let next_attempt_at: Option<i64> = row.try_get("next_attempt_at").ok()?;
+    match read_webhook_row(row) {
+        Ok(webhook) => Some(webhook),
+        Err(e) => {
+            // Best effort: the id itself may be what failed to read.
+            let id: Option<i64> = row.try_get("id").ok();
 
-    let headers: HashMap<String, String> = serde_json::from_str(&headers_str).unwrap_or_default();
+            log::warn!("skipping unreadable webhook row (id={id:?}): {e}");
+            None
+        }
+    }
+}
 
-    Some(Webhook {
+/// The error names the offending column, so the caller does not have to.
+fn read_webhook_row(row: &sqlx::sqlite::SqliteRow) -> Result<Webhook, sqlx::Error> {
+    let id: i64 = row.try_get("id")?;
+    let channel: String = row.try_get("channel")?;
+    let headers_str: String = row.try_get("headers")?;
+    let payload: Vec<u8> = row.try_get("payload")?;
+    let received_at: i64 = row.try_get("received_at")?;
+    let forward_attempts: i64 = row.try_get("forward_attempts")?;
+    let last_attempt_at: Option<i64> = row.try_get("last_attempt_at")?;
+    let last_attempt_error: Option<String> = row.try_get("last_attempt_error")?;
+    let next_attempt_at: Option<i64> = row.try_get("next_attempt_at")?;
+
+    // Unparsable headers must not cost the payload, so the webhook is still returned
+    // — but it is forwarded without the headers the sender set, which is a visible
+    // difference and cannot be silent.
+    let headers: HashMap<String, String> = match serde_json::from_str(&headers_str) {
+        Ok(headers) => headers,
+        Err(e) => {
+            log::warn!("webhook {id} has unreadable stored headers, forwarding without them: {e}");
+            HashMap::new()
+        }
+    };
+
+    Ok(Webhook {
         id: Some(id),
         channel: WebhookChannel::new(channel),
         headers,
@@ -91,7 +124,19 @@ impl WebhookRepository for Sqlite {
             .await
             .map_err(to_repository_error)?;
 
-        let webhooks = rows.iter().filter_map(parse_webhook_row).collect();
+        let webhooks: Vec<Webhook> = rows.iter().filter_map(parse_webhook_row).collect();
+
+        // The rows are already deleted, so anything that could not be read is gone
+        // for good. That is data loss, and unlike the read-only queries it cannot be
+        // repeated per pass — so it is reported once, at error level.
+        if webhooks.len() < rows.len() {
+            log::error!(
+                "{} of {} webhooks for channel {} could not be read and are lost — they were deleted by this poll",
+                rows.len() - webhooks.len(),
+                rows.len(),
+                channel.as_str()
+            );
+        }
 
         Ok(webhooks)
     }
@@ -288,6 +333,54 @@ mod tests {
 
     async fn get_in_memory_db() -> Sqlite {
         Sqlite::new("sqlite::memory:").await.unwrap()
+    }
+
+    /// A row the adapter cannot read must say which column defeated it — without
+    /// that, an unreadable row stops a channel with nothing in the log to explain it.
+    #[tokio::test]
+    async fn an_unreadable_row_names_the_missing_column() {
+        let db = get_in_memory_db().await;
+
+        let row = sqlx::query("SELECT 1 AS id")
+            .fetch_one(db.get_pool())
+            .await
+            .unwrap();
+
+        let error = read_webhook_row(&row).expect_err("a row without the columns cannot be read");
+
+        assert!(
+            format!("{error}").contains("channel"),
+            "the log record has to point at the offending column, got: {error}"
+        );
+        assert!(
+            parse_webhook_row(&row).is_none(),
+            "an unreadable row is still skipped, only no longer in silence"
+        );
+    }
+
+    /// Stored headers that are not valid JSON cost the headers, not the webhook.
+    #[tokio::test]
+    async fn a_webhook_with_unreadable_headers_is_still_returned() {
+        let db = get_in_memory_db().await;
+
+        sqlx::query(
+            "INSERT INTO webhooks (channel, headers, payload, received_at) VALUES (?, ?, ?, ?)",
+        )
+        .bind("telegram")
+        .bind("not json")
+        .bind(b"{}".as_slice())
+        .bind(NOW)
+        .execute(db.get_pool())
+        .await
+        .unwrap();
+
+        let webhooks = db
+            .list_by_channel(&WebhookChannel::new("telegram"))
+            .await
+            .unwrap();
+
+        assert_eq!(webhooks.len(), 1, "the payload must survive bad headers");
+        assert!(webhooks[0].headers.is_empty());
     }
 
     fn make_webhook(channel: &str, payload: &[u8], received_at: i64) -> Webhook {

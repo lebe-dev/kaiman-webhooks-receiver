@@ -71,6 +71,16 @@ async fn main() -> anyhow::Result<()> {
 }
 
 async fn run() -> anyhow::Result<()> {
+    // Installed before the configuration is read: `EnvConfigLoader` warns about
+    // values it cannot use, and `log` macros are no-ops until a logger exists, so
+    // installing it afterwards would drop exactly those warnings.
+    let (log_level, log_target) = kwp_lib::outbound::config::log_settings_from_env();
+    logger::init(&log_level, &log_target, observability::is_enabled())?;
+
+    if observability::is_enabled() {
+        log::info!("Sentry error reporting is enabled");
+    }
+
     let config_loader = EnvConfigLoader;
     let app_config = config_loader.load()?;
     app_config
@@ -90,14 +100,17 @@ async fn run() -> anyhow::Result<()> {
     // them before any request is served.
     observability::init_sensitive_headers(&app_config.channels);
 
-    logger::init(
-        &app_config.log_level,
-        &app_config.log_target,
-        observability::is_enabled(),
-    )?;
-
-    if observability::is_enabled() {
-        log::info!("Sentry error reporting is enabled");
+    // Whether proxy headers are honoured at all is a constant of this process, so
+    // it is stated once here instead of on every request.
+    if app_config.trusted_proxies.is_empty() {
+        log::info!(
+            "TRUSTED_PROXIES is empty, proxy headers are ignored and the connection IP is used"
+        );
+    } else {
+        log::info!(
+            "trusting proxy headers from {} configured proxies",
+            app_config.trusted_proxies.len()
+        );
     }
 
     let db = Sqlite::new(&app_config.db_cnn).await?;
@@ -225,7 +238,8 @@ async fn run() -> anyhow::Result<()> {
     }
 
     // Layers are applied outside-in in reverse order: the Sentry hub is bound first,
-    // then the client IP is resolved, and only then the scope middleware reads it.
+    // then the request gets its id, then the client IP is resolved, and only then
+    // the scope middleware reads both.
     let app = app
         .layer(DefaultBodyLimit::max(app_config.max_body_limit()))
         .layer(axum::middleware::from_fn(
@@ -235,6 +249,9 @@ async fn run() -> anyhow::Result<()> {
             middleware::client_ip::ClientIpExtractor::middleware,
         ))
         .layer(axum::Extension(app_config.trusted_proxies.clone()))
+        .layer(axum::middleware::from_fn(
+            middleware::request_id::middleware,
+        ))
         .layer(NewSentryLayer::<axum::extract::Request>::new_from_top())
         .with_state(app_state);
 

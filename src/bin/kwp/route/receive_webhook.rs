@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 
 use crate::AppState;
 use crate::middleware::client_ip::ClientIp;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::config::model::SecretType;
 use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::model::WebhookChannel;
@@ -31,28 +32,42 @@ fn inc_receive(channel: &str, status: &'static str, enabled: bool) {
 pub async fn receive_webhook_route(
     State(state): State<Arc<AppState>>,
     Extension(client_ip): Extension<ClientIp>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    // Arrival is only logged at DEBUG: an unauthenticated sender must not be able to
+    // fill the INFO log. Accepted webhooks are reported once below, and every reason
+    // for rejecting one is a warning of its own.
     log::debug!(
-        "incoming webhook from {} for channel: '{}'",
+        "[req:{}] incoming webhook from {} for channel: '{}' ({} bytes)",
+        request_id,
         client_ip.0,
-        channel_name
+        channel_name,
+        body.len()
     );
-    log::info!(">>> incoming webhook for channel: '{}'", channel_name);
 
     let channel_config = match state.config.find_channel_by_name(&channel_name) {
         Some(c) => c,
         None => {
-            log::warn!("webhook received for unknown channel: {}", channel_name);
+            log::warn!(
+                "[req:{}] webhook received for unknown channel: {}",
+                request_id,
+                channel_name
+            );
             inc_receive(&channel_name, "channel_not_found", true);
             return (StatusCode::NOT_FOUND, "Channel not found").into_response();
         }
     };
 
     if !channel_config.is_ip_allowed(&client_ip.0) {
-        log::warn!("IP {} blocked for channel: '{}'", client_ip.0, channel_name);
+        log::warn!(
+            "[req:{}] IP {} blocked for channel: '{}'",
+            request_id,
+            client_ip.0,
+            channel_name
+        );
         inc_receive(
             &channel_name,
             "ip_blocked",
@@ -65,7 +80,11 @@ pub async fn receive_webhook_route(
         &channel_config.webhook_secret,
         &channel_config.secret_header,
     ) {
-        log::debug!("verifying webhook secret for channel: '{}'", channel_name);
+        log::debug!(
+            "[req:{}] verifying webhook secret for channel: '{}'",
+            request_id,
+            channel_name
+        );
         let provided_raw = headers
             .get(header_name.as_str())
             .and_then(|v| v.to_str().ok());
@@ -77,7 +96,11 @@ pub async fn receive_webhook_route(
             },
             SecretType::HmacSha256 => {
                 let Some(raw) = provided_raw else {
-                    log::warn!("missing secret header for channel: {}", channel_name);
+                    log::warn!(
+                        "[req:{}] missing secret header for channel: {}",
+                        request_id,
+                        channel_name
+                    );
                     inc_receive(
                         &channel_name,
                         "unauthorized",
@@ -93,7 +116,8 @@ pub async fn receive_webhook_route(
                     Ok(h) => h,
                     Err(e) => {
                         log::error!(
-                            "secret-extract-template render failed for channel '{}': {}",
+                            "[req:{}] secret-extract-template render failed for channel '{}': {}",
+                            request_id,
                             channel_name,
                             e
                         );
@@ -111,9 +135,17 @@ pub async fn receive_webhook_route(
         };
 
         if verified {
-            log::debug!("webhook secret verified for channel: {}", channel_name);
+            log::debug!(
+                "[req:{}] webhook secret verified for channel: {}",
+                request_id,
+                channel_name
+            );
         } else {
-            log::warn!("invalid webhook secret for channel: {}", channel_name);
+            log::warn!(
+                "[req:{}] invalid webhook secret for channel: {}",
+                request_id,
+                channel_name
+            );
             inc_receive(
                 &channel_name,
                 "unauthorized",
@@ -129,7 +161,8 @@ pub async fn receive_webhook_route(
 
     if body.len() > effective_limit {
         log::warn!(
-            "request body too large for channel {}: {} bytes > limit {} bytes",
+            "[req:{}] request body too large for channel {}: {} bytes > limit {} bytes",
+            request_id,
             channel_name,
             body.len(),
             effective_limit
@@ -148,7 +181,8 @@ pub async fn receive_webhook_route(
         .unwrap_or("");
     if !content_type.starts_with("application/json") {
         log::warn!(
-            "unsupported content type for channel {}: {}",
+            "[req:{}] unsupported content type for channel {}: {}",
+            request_id,
             channel_name,
             content_type
         );
@@ -165,7 +199,11 @@ pub async fn receive_webhook_route(
     }
 
     if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        log::warn!("invalid JSON body for channel {}", channel_name);
+        log::warn!(
+            "[req:{}] invalid JSON body for channel {}",
+            request_id,
+            channel_name
+        );
         inc_receive(
             &channel_name,
             "invalid_json",
@@ -174,7 +212,11 @@ pub async fn receive_webhook_route(
         return (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON").into_response();
     }
 
-    log::debug!("filtering headers for channel: {}", channel_name);
+    log::debug!(
+        "[req:{}] filtering headers for channel: {}",
+        request_id,
+        channel_name
+    );
     let forwarded_headers: HashMap<String, String> = headers
         .iter()
         .filter_map(|(k, v)| {
@@ -187,6 +229,8 @@ pub async fn receive_webhook_route(
         .collect();
 
     let channel = WebhookChannel::new(channel_name.clone());
+    // Read before `body` is handed to the service, which consumes it.
+    let body_len = body.len();
 
     match state
         .webhook_service
@@ -195,8 +239,10 @@ pub async fn receive_webhook_route(
     {
         Ok(()) => {
             log::info!(
-                "webhook successfully processed and stored for channel: {}",
-                channel_name
+                "[req:{}] webhook successfully processed and stored for channel: {} ({} bytes)",
+                request_id,
+                channel_name,
+                body_len
             );
             inc_receive(&channel_name, "ok", channel_config.monitoring_metrics);
             (StatusCode::OK, "OK").into_response()
@@ -205,7 +251,8 @@ pub async fn receive_webhook_route(
         // sender redelivers, whereas a 500 would silently drop the webhook.
         Err(e) if e.is_busy() => {
             log::warn!(
-                "storage busy, asking sender to redeliver webhook for channel {}: {}",
+                "[req:{}] storage busy, asking sender to redeliver webhook for channel {}: {}",
+                request_id,
                 channel_name,
                 e
             );
@@ -218,7 +265,8 @@ pub async fn receive_webhook_route(
         }
         Err(e) => {
             log::error!(
-                "failed to store webhook for channel {}: {}",
+                "[req:{}] failed to store webhook for channel {}: {}",
+                request_id,
                 channel_name,
                 e
             );
@@ -375,6 +423,9 @@ mod tests {
             .route("/api/webhook/{channel}", post(receive_webhook_route))
             .route("/api/webhook/{channel}", get(read_webhooks_route))
             .layer(Extension(ClientIp(client_ip)))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::request_id::middleware,
+            ))
             .with_state(state)
     }
 

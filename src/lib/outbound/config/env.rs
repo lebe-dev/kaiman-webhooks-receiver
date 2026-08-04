@@ -12,6 +12,22 @@ use crate::domain::config::ports::AppConfigLoader;
 
 const DEFAULT_BODY_LIMIT_BYTES: usize = 262_144; // 256 KB
 
+const DEFAULT_LOG_LEVEL: &str = "info";
+const DEFAULT_LOG_TARGET: &str = "stdout";
+
+/// Reads the logging settings on their own, before the rest of the configuration.
+///
+/// The logger has to be installed before [`AppConfigLoader::load`] runs: `load`
+/// warns about unusable values, and `log` macros are no-ops until a logger exists,
+/// so those warnings would otherwise be dropped. `load` reads the same two
+/// variables through here, so the two paths cannot disagree.
+pub fn log_settings_from_env() -> (String, String) {
+    (
+        env::var("LOG_LEVEL").unwrap_or_else(|_| DEFAULT_LOG_LEVEL.to_string()),
+        env::var("LOG_TARGET").unwrap_or_else(|_| DEFAULT_LOG_TARGET.to_string()),
+    )
+}
+
 #[derive(Deserialize)]
 struct WebhookChannelsConfig {
     channels: Vec<WebhookChannelConfig>,
@@ -24,9 +40,7 @@ impl AppConfigLoader for EnvConfigLoader {
     fn load(&self) -> Result<AppConfig, LoadAppConfigError> {
         let bind = env::var("BIND_ADDRESS").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
 
-        let log_level = env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
-
-        let log_target = env::var("LOG_TARGET").unwrap_or_else(|_| "stdout".to_string());
+        let (log_level, log_target) = log_settings_from_env();
 
         let data_path = env::var("DATA_PATH").unwrap_or_else(|_| "./data".to_string());
 
@@ -102,6 +116,9 @@ impl AppConfigLoader for EnvConfigLoader {
                 log::warn!(
                     "UI_ACCESS_TOKEN is not set — generated a temporary token for this session"
                 );
+                // Deliberately printed rather than logged: the token is a credential,
+                // and `warn!` records become Sentry breadcrumbs that would carry it
+                // off the host with the next reported error.
                 println!("UI_ACCESS_TOKEN={generated}");
                 generated
             }

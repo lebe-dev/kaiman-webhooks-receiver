@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -11,6 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::AppState;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::webhook::model::WebhookChannel;
 
 #[derive(Serialize)]
@@ -23,11 +24,10 @@ pub struct WebhookListItemDto {
 
 pub async fn list_webhooks_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!("request to list webhooks for channel: {}", channel_name);
-
     let bearer = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -37,7 +37,8 @@ pub async fn list_webhooks_route(
         Some(b) => b,
         None => {
             log::warn!(
-                "missing or invalid Authorization header for list on channel: {}",
+                "[req:{}] missing or invalid Authorization header for list on channel: {}",
+                request_id,
                 channel_name
             );
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -48,7 +49,8 @@ pub async fn list_webhooks_route(
         Some(c) => {
             if c.name != channel_name {
                 log::warn!(
-                    "token for channel '{}' used to list channel '{}'",
+                    "[req:{}] token for channel '{}' used to list channel '{}'",
+                    request_id,
                     c.name,
                     channel_name
                 );
@@ -58,7 +60,8 @@ pub async fn list_webhooks_route(
         None => {
             if !state.config.is_ui_token(bearer) {
                 log::warn!(
-                    "invalid token for list request on channel: {}",
+                    "[req:{}] invalid token for list request on channel: {}",
+                    request_id,
                     channel_name
                 );
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -73,8 +76,9 @@ pub async fn list_webhooks_route(
 
     match state.webhook_service.list_webhooks(&channel).await {
         Ok(webhooks) => {
-            log::info!(
-                "listed {} webhooks for channel: {}",
+            log::debug!(
+                "[req:{}] listed {} webhooks for channel: {}",
+                request_id,
                 webhooks.len(),
                 channel_name
             );
@@ -93,11 +97,21 @@ pub async fn list_webhooks_route(
             (StatusCode::OK, Json(dtos)).into_response()
         }
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy listing webhooks for {}: {}", channel_name, e);
+            log::warn!(
+                "[req:{}] storage busy listing webhooks for {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             crate::route::storage_busy_response()
         }
         Err(e) => {
-            log::error!("Failed to list webhooks: {}", e);
+            log::error!(
+                "[req:{}] failed to list webhooks for channel {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
         }
     }

@@ -1,25 +1,22 @@
 use std::sync::Arc;
 
 use axum::{
+    Extension,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
 
 use crate::AppState;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::webhook::model::WebhookChannel;
 
 pub async fn delete_webhook_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path((channel_name, webhook_id)): Path<(String, i64)>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!(
-        "request to delete webhook {} for channel: {}",
-        webhook_id,
-        channel_name
-    );
-
     let bearer = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -29,7 +26,8 @@ pub async fn delete_webhook_route(
         Some(b) => b,
         None => {
             log::warn!(
-                "missing or invalid Authorization header for delete on channel: {}",
+                "[req:{}] missing or invalid Authorization header for delete on channel: {}",
+                request_id,
                 channel_name
             );
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -40,7 +38,8 @@ pub async fn delete_webhook_route(
         Some(c) => {
             if c.name != channel_name {
                 log::warn!(
-                    "token for channel '{}' used to delete webhook in channel '{}'",
+                    "[req:{}] token for channel '{}' used to delete webhook in channel '{}'",
+                    request_id,
                     c.name,
                     channel_name
                 );
@@ -50,7 +49,8 @@ pub async fn delete_webhook_route(
         None => {
             if !state.config.is_ui_token(bearer) {
                 log::warn!(
-                    "invalid token for delete request on channel: {}",
+                    "[req:{}] invalid token for delete request on channel: {}",
+                    request_id,
                     channel_name
                 );
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -68,18 +68,30 @@ pub async fn delete_webhook_route(
     {
         Ok(_) => {
             log::info!(
-                "successfully deleted webhook {} for channel: {}",
+                "[req:{}] successfully deleted webhook {} for channel: {}",
+                request_id,
                 webhook_id,
                 channel_name
             );
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy deleting webhook {}: {}", webhook_id, e);
+            log::warn!(
+                "[req:{}] storage busy deleting webhook {}: {}",
+                request_id,
+                webhook_id,
+                e
+            );
             crate::route::storage_busy_response()
         }
         Err(e) => {
-            log::error!("Failed to delete webhook: {}", e);
+            log::error!(
+                "[req:{}] failed to delete webhook {} for channel {}: {}",
+                request_id,
+                webhook_id,
+                channel_name,
+                e
+            );
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
         }
     }
@@ -154,6 +166,9 @@ mod tests {
 
         Router::new()
             .route("/api/webhook/{channel}/{id}", delete(delete_webhook_route))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::request_id::middleware,
+            ))
             .with_state(app_state)
     }
 

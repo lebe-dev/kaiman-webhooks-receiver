@@ -124,7 +124,13 @@ pub fn task_hub(component: &str, channel: &str) -> std::sync::Arc<sentry::Hub> {
 /// Header values are redacted (see [`SENSITIVE_HEADER_MARKERS`] and
 /// [`init_sensitive_headers`]) because webhook secrets and signatures travel in
 /// headers whose names come from user configuration.
-pub fn set_request_scope(method: &Method, uri: &Uri, client_ip: IpAddr, headers: &HeaderMap) {
+pub fn set_request_scope(
+    method: &Method,
+    uri: &Uri,
+    client_ip: IpAddr,
+    headers: &HeaderMap,
+    request_id: Option<&str>,
+) {
     let request = SentryRequest {
         method: Some(method.to_string()),
         url: absolute_url(uri, headers).and_then(|url| url.parse().ok()),
@@ -144,6 +150,12 @@ pub fn set_request_scope(method: &Method, uri: &Uri, client_ip: IpAddr, headers:
 
         if let Some(channel) = &channel {
             scope.set_tag("channel", channel);
+        }
+
+        // Tagged rather than put in `extra`, so an event can be looked up by the id
+        // that appears in the log records of the same request.
+        if let Some(request_id) = request_id {
+            scope.set_tag("request_id", request_id);
         }
 
         scope.add_event_processor(move |mut event| {

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
@@ -12,6 +12,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::AppState;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::config::model::WebhookForwardConfig;
 use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::backoff::{self, FailureKind};
@@ -59,8 +60,10 @@ fn now_unix() -> i64 {
 ///
 /// Without this a failed manual retry would leave the webhook due immediately,
 /// undoing the delay the forwarder had already assigned to it.
+#[allow(clippy::too_many_arguments)]
 async fn record_manual_failure(
     state: &AppState,
+    request_id: &RequestId,
     channel_name: &str,
     webhook: &Webhook,
     forward_cfg: &WebhookForwardConfig,
@@ -86,7 +89,7 @@ async fn record_manual_failure(
         .record_forward_failure(webhook_id, error_msg, next_attempt_at)
         .await
     {
-        log::error!("failed to record attempt for webhook {webhook_id}: {e}");
+        log::error!("[req:{request_id}] failed to record attempt for webhook {webhook_id}: {e}");
     }
 
     if let Ok(mut map) = state.forward_statuses.write()
@@ -118,11 +121,10 @@ pub struct QueueResponse {
 
 pub async fn get_queue_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!("request to get queue for channel: {}", channel_name);
-
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -131,6 +133,14 @@ pub async fn get_queue_route(
     if let Err((status, msg)) = authorize_channel(&state, bearer, &channel_name) {
         return (status, msg).into_response();
     }
+
+    // The UI polls this endpoint, and reading the queue changes nothing, so it stays
+    // out of the INFO narrative.
+    log::debug!(
+        "[req:{}] request to get queue for channel: {}",
+        request_id,
+        channel_name
+    );
 
     let channel_cfg = match state.config.find_channel_by_name(&channel_name) {
         Some(c) => c,
@@ -150,11 +160,21 @@ pub async fn get_queue_route(
     let webhooks = match state.webhook_service.list_queue(&channel).await {
         Ok(w) => w,
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy listing queue for {}: {}", channel_name, e);
+            log::warn!(
+                "[req:{}] storage busy listing queue for {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             return crate::route::storage_busy_response();
         }
         Err(e) => {
-            log::error!("Failed to list queue for channel {}: {}", channel_name, e);
+            log::error!(
+                "[req:{}] failed to list queue for channel {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
         }
     };
@@ -197,11 +217,10 @@ pub async fn get_queue_route(
 
 pub async fn pause_queue_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!("request to pause queue for channel: {}", channel_name);
-
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -214,7 +233,11 @@ pub async fn pause_queue_route(
     let mut map = match state.forward_statuses.write() {
         Ok(m) => m,
         Err(e) => {
-            log::error!("forward statuses lock is poisoned: {}", e);
+            log::error!(
+                "[req:{}] forward statuses lock is poisoned: {}",
+                request_id,
+                e
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
         }
     };
@@ -222,7 +245,11 @@ pub async fn pause_queue_route(
     match map.get_mut(&channel_name) {
         Some(status) => {
             status.paused = true;
-            log::info!("paused queue for channel: {}", channel_name);
+            log::info!(
+                "[req:{}] paused queue for channel: {}",
+                request_id,
+                channel_name
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         None => (
@@ -235,11 +262,10 @@ pub async fn pause_queue_route(
 
 pub async fn resume_queue_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!("request to resume queue for channel: {}", channel_name);
-
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -252,7 +278,11 @@ pub async fn resume_queue_route(
     let mut map = match state.forward_statuses.write() {
         Ok(m) => m,
         Err(e) => {
-            log::error!("forward statuses lock is poisoned: {}", e);
+            log::error!(
+                "[req:{}] forward statuses lock is poisoned: {}",
+                request_id,
+                e
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
         }
     };
@@ -260,7 +290,11 @@ pub async fn resume_queue_route(
     match map.get_mut(&channel_name) {
         Some(status) => {
             status.paused = false;
-            log::info!("resumed queue for channel: {}", channel_name);
+            log::info!(
+                "[req:{}] resumed queue for channel: {}",
+                request_id,
+                channel_name
+            );
             StatusCode::NO_CONTENT.into_response()
         }
         None => (
@@ -273,11 +307,10 @@ pub async fn resume_queue_route(
 
 pub async fn clear_queue_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!("request to clear queue for channel: {}", channel_name);
-
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -292,7 +325,8 @@ pub async fn clear_queue_route(
     match state.webhook_service.clear_queue(&channel).await {
         Ok(deleted) => {
             log::info!(
-                "cleared {} webhooks from queue for channel: {}",
+                "[req:{}] cleared {} webhooks from queue for channel: {}",
+                request_id,
                 deleted,
                 channel_name
             );
@@ -306,11 +340,21 @@ pub async fn clear_queue_route(
             StatusCode::NO_CONTENT.into_response()
         }
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy clearing queue for {}: {}", channel_name, e);
+            log::warn!(
+                "[req:{}] storage busy clearing queue for {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             crate::route::storage_busy_response()
         }
         Err(e) => {
-            log::error!("Failed to clear queue for channel {}: {}", channel_name, e);
+            log::error!(
+                "[req:{}] failed to clear queue for channel {}: {}",
+                request_id,
+                channel_name,
+                e
+            );
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
         }
     }
@@ -326,15 +370,10 @@ pub struct RetryResponse {
 
 pub async fn retry_webhook_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path((channel_name, webhook_id)): Path<(String, i64)>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    log::info!(
-        "request to retry webhook {} for channel: {}",
-        webhook_id,
-        channel_name
-    );
-
     let bearer = match extract_bearer(&headers) {
         Some(b) => b,
         None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
@@ -343,6 +382,13 @@ pub async fn retry_webhook_route(
     if let Err((status, msg)) = authorize_channel(&state, bearer, &channel_name) {
         return (status, msg).into_response();
     }
+
+    log::info!(
+        "[req:{}] request to retry webhook {} for channel: {}",
+        request_id,
+        webhook_id,
+        channel_name
+    );
 
     let channel_cfg = match state.config.find_channel_by_name(&channel_name) {
         Some(c) => c,
@@ -364,11 +410,21 @@ pub async fn retry_webhook_route(
         Ok(Some(w)) => w,
         Ok(None) => return (StatusCode::NOT_FOUND, "Webhook not found").into_response(),
         Err(e) if e.is_busy() => {
-            log::warn!("storage busy fetching webhook {}: {}", webhook_id, e);
+            log::warn!(
+                "[req:{}] storage busy fetching webhook {}: {}",
+                request_id,
+                webhook_id,
+                e
+            );
             return crate::route::storage_busy_response();
         }
         Err(e) => {
-            log::error!("Failed to get webhook {}: {}", webhook_id, e);
+            log::error!(
+                "[req:{}] failed to get webhook {}: {}",
+                request_id,
+                webhook_id,
+                e
+            );
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
         }
     };
@@ -408,7 +464,8 @@ pub async fn retry_webhook_route(
             .or(channel_cfg.webhook_secret.as_deref());
         let Some(sign_secret) = effective_secret else {
             log::error!(
-                "channel '{}': sign-header configured but no sign-secret or webhook-secret available",
+                "[req:{}] channel '{}': sign-header configured but no sign-secret or webhook-secret available",
+                request_id,
                 channel_name
             );
             return (
@@ -423,7 +480,8 @@ pub async fn retry_webhook_route(
                 Ok(v) => v,
                 Err(e) => {
                     log::error!(
-                        "sign-template render failed for channel '{}': {}",
+                        "[req:{}] sign-template render failed for channel '{}': {}",
+                        request_id,
                         channel_name,
                         e
                     );
@@ -444,7 +502,8 @@ pub async fn retry_webhook_route(
                 src = next;
             }
             log::warn!(
-                "retry webhook {} for channel '{}' failed: {}",
+                "[req:{}] retry webhook {} for channel '{}' failed: {}",
+                request_id,
                 webhook_id,
                 channel_name,
                 cause
@@ -453,6 +512,7 @@ pub async fn retry_webhook_route(
             let error_msg = format!("network error: {cause}");
             record_manual_failure(
                 &state,
+                &request_id,
                 &channel_name,
                 &webhook,
                 forward_cfg,
@@ -488,16 +548,29 @@ pub async fn retry_webhook_route(
 
             if status_code == forward_cfg.expected_status {
                 log::info!(
-                    "retry webhook {} for channel '{}' succeeded (status={})",
+                    "[req:{}] retry webhook {} for channel '{}' succeeded (status={})",
+                    request_id,
                     webhook_id,
                     channel_name,
                     status_code
                 );
 
-                let _ = state
+                // A webhook that was delivered but not removed is still queued, so
+                // the forwarder will deliver it a second time. The operator has to
+                // learn that from here — the duplicate itself looks like a success.
+                if let Err(e) = state
                     .webhook_service
                     .delete_webhook(&WebhookChannel::new(channel_name.clone()), webhook_id)
-                    .await;
+                    .await
+                {
+                    log::error!(
+                        "[req:{}] webhook {} for channel '{}' was delivered by manual retry but could not be removed, it will be delivered again: {}",
+                        request_id,
+                        webhook_id,
+                        channel_name,
+                        e
+                    );
+                }
 
                 if let Ok(mut map) = state.forward_statuses.write()
                     && let Some(status) = map.get_mut(&channel_name)
@@ -519,7 +592,8 @@ pub async fn retry_webhook_route(
             } else {
                 let error_msg = format!("HTTP {}: {}", status_code, body);
                 log::warn!(
-                    "retry webhook {} for channel '{}' got unexpected status {}: {}",
+                    "[req:{}] retry webhook {} for channel '{}' got unexpected status {}: {}",
+                    request_id,
                     webhook_id,
                     channel_name,
                     status_code,
@@ -528,6 +602,7 @@ pub async fn retry_webhook_route(
 
                 record_manual_failure(
                     &state,
+                    &request_id,
                     &channel_name,
                     &webhook,
                     forward_cfg,
@@ -660,6 +735,9 @@ mod tests {
                 "/api/webhook/{channel}/queue/clear",
                 post(clear_queue_route),
             )
+            .layer(axum::middleware::from_fn(
+                crate::middleware::request_id::middleware,
+            ))
             .with_state(app_state.clone());
 
         (router, app_state)

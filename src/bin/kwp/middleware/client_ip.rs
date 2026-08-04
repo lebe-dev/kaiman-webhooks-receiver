@@ -34,12 +34,10 @@ impl ClientIpExtractor {
         connection_ip: IpAddr,
         trusted_proxies: &[String],
     ) -> IpAddr {
-        let should_trust_headers = if trusted_proxies.is_empty() {
-            log::debug!("trusted-proxies is empty, ignoring proxy headers for security");
-            false
-        } else {
-            Self::is_trusted_proxy(&connection_ip, trusted_proxies)
-        };
+        // Whether the list is empty at all is reported once at startup by `main`,
+        // not on every request.
+        let should_trust_headers =
+            !trusted_proxies.is_empty() && Self::is_trusted_proxy(&connection_ip, trusted_proxies);
 
         if !should_trust_headers {
             log::debug!(

@@ -134,3 +134,31 @@ The sign endpoint only works for channels with `secret-type: hmac-sha256`. For `
 3. Call `POST /api/webhook/{channel}/sign` with that body
 4. Compare the returned `header_value` against what the external service sent
 5. If they differ, check that `webhook-secret` in your config matches the secret configured in the external service
+
+## Reading the Logs
+
+Every log record produced while handling an HTTP request carries a short request id:
+
+```
+WARN - [kwp::route::receive_webhook] - [req:48bd6544] invalid webhook secret for channel: telegram
+```
+
+The id is generated per request, so `grep 48bd6544` collects everything that happened while
+that one webhook was being handled — useful when several senders are active at once. It is
+not stored anywhere and is not reused across requests. Records from the background
+forwarders are tagged with their channel instead: `[forwarder:telegram]`.
+
+At the default `LOG_LEVEL=info` the log tells you what the service did:
+
+- **INFO** — startup, which channels have a forwarder, accepted webhooks, delivery outcomes,
+  and changes made through the API (queue paused, queue cleared, webhook deleted).
+- **WARN** — a request that was turned away (unknown channel, blocked IP, bad signature,
+  oversized body, invalid JSON) and conditions the service recovered from, such as a busy
+  database answered with `503`.
+- **ERROR** — something that needs attention: a webhook that could not be stored, or one
+  that was delivered but could not be removed from the queue and will be delivered again.
+
+Set `LOG_LEVEL=debug` to add the detail behind a decision — when a webhook arrived and from
+which IP, whether a secret was verified, payload sizes, and why a queued webhook is not due
+yet. Secrets, tokens and computed signatures are never written to the log at any level, so
+`debug` is safe to enable on a production instance while you investigate.

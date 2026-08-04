@@ -143,8 +143,16 @@ impl<R: WebhookRepository> Forwarder<R> {
     /// Needed because a queue can be non-empty while nothing in it is due, so the
     /// forwarder cannot infer the size from "no webhook to send".
     async fn refresh_queue_size(&self) {
-        if let Ok(count) = self.repo.count_by_channel(&self.channel).await {
-            self.update_status(|status| status.queue_size = count);
+        match self.repo.count_by_channel(&self.channel).await {
+            Ok(count) => self.update_status(|status| status.queue_size = count),
+            // Forwarding is unaffected — only the number the UI shows goes stale —
+            // so this is not worth an error, but it has to be visible: otherwise a
+            // wrong queue size in the UI has no explanation anywhere.
+            Err(e) => log::warn!(
+                "[forwarder:{}] queue size refresh failed, the UI count stays stale: {}",
+                self.name(),
+                e
+            ),
         }
     }
 

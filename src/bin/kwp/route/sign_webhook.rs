@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Json,
+    Extension, Json,
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
@@ -10,6 +10,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::AppState;
+use crate::middleware::request_id::RequestId;
 use kwp_lib::domain::config::model::SecretType;
 use kwp_lib::domain::crypto;
 
@@ -22,12 +23,11 @@ pub struct SignResponseDto {
 
 pub async fn sign_webhook_route(
     State(state): State<Arc<AppState>>,
+    Extension(request_id): Extension<RequestId>,
     Path(channel_name): Path<String>,
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    log::info!("request to sign payload for channel: {}", channel_name);
-
     let bearer = headers
         .get("Authorization")
         .and_then(|v| v.to_str().ok())
@@ -37,7 +37,8 @@ pub async fn sign_webhook_route(
         Some(b) => b,
         None => {
             log::warn!(
-                "missing or invalid Authorization header for sign request on channel: {}",
+                "[req:{}] missing or invalid Authorization header for sign request on channel: {}",
+                request_id,
                 channel_name
             );
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -48,7 +49,8 @@ pub async fn sign_webhook_route(
         Some(c) => {
             if c.name != channel_name {
                 log::warn!(
-                    "token for channel '{}' used to sign for channel '{}'",
+                    "[req:{}] token for channel '{}' used to sign for channel '{}'",
+                    request_id,
                     c.name,
                     channel_name
                 );
@@ -59,7 +61,8 @@ pub async fn sign_webhook_route(
         None => {
             if !state.config.is_ui_token(bearer) {
                 log::warn!(
-                    "invalid token for sign request on channel: {}",
+                    "[req:{}] invalid token for sign request on channel: {}",
+                    request_id,
                     channel_name
                 );
                 return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
@@ -73,7 +76,8 @@ pub async fn sign_webhook_route(
 
     if channel_config.secret_type != SecretType::HmacSha256 {
         log::warn!(
-            "sign requested for channel '{}' which does not use hmac-sha256",
+            "[req:{}] sign requested for channel '{}' which does not use hmac-sha256",
+            request_id,
             channel_name
         );
         return (
@@ -97,7 +101,8 @@ pub async fn sign_webhook_route(
         Ok(v) => v,
         Err(e) => {
             log::error!(
-                "secret-sign-template render failed for channel '{}': {}",
+                "[req:{}] secret-sign-template render failed for channel '{}': {}",
+                request_id,
                 channel_name,
                 e
             );
@@ -105,7 +110,11 @@ pub async fn sign_webhook_route(
         }
     };
 
-    log::info!("computed signature for channel: {}", channel_name);
+    log::info!(
+        "[req:{}] computed signature for channel: {}",
+        request_id,
+        channel_name
+    );
     (
         StatusCode::OK,
         Json(SignResponseDto {
@@ -205,6 +214,9 @@ mod tests {
         Router::new()
             .route("/api/webhook/{channel}/sign", post(sign_webhook_route))
             .layer(Extension(ClientIp(client_ip)))
+            .layer(axum::middleware::from_fn(
+                crate::middleware::request_id::middleware,
+            ))
             .with_state(state)
     }
 

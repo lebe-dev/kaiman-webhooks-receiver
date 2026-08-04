@@ -145,8 +145,13 @@ where
             return Err(error);
         }
 
+        // Giving up is a warning, not an error: the caller turns it into a 503 with
+        // `Retry-After` and the sender redelivers, so this is handled degradation.
+        // Logging it at error level would raise a Sentry event per lost race, while
+        // the records that do deserve one — a webhook that could not be stored, a
+        // delivery that could not be recorded — are written by the caller.
         if attempt_number >= policy.max_attempts {
-            log::error!(
+            log::warn!(
                 "sqlite {operation} gave up after {attempt_number} attempts, database still locked: {error}"
             );
             return Err(error);
@@ -155,7 +160,7 @@ where
         let backoff = policy.backoff_after(attempt_number);
 
         if started.elapsed() + backoff >= policy.budget {
-            log::error!(
+            log::warn!(
                 "sqlite {operation} gave up after {:?} (retry budget {:?}), database still locked: {error}",
                 started.elapsed(),
                 policy.budget
