@@ -1,14 +1,12 @@
 import js from "@eslint/js";
 import ts from "typescript-eslint";
 import svelte from "eslint-plugin-svelte";
-import astro from "eslint-plugin-astro";
 import globals from "globals";
 
 export default [
   js.configs.recommended,
   ...ts.configs.recommended,
   ...svelte.configs["flat/recommended"],
-  ...astro.configs.recommended,
   {
     languageOptions: {
       globals: {

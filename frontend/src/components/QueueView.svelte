@@ -183,7 +183,7 @@
     <Button
       variant="outline"
       size="sm"
-      onclick={load}
+      onclick={() => load()}
       disabled={loading}
     >
       <RotateCw size={16} class={loading ? "animate-spin" : ""} />

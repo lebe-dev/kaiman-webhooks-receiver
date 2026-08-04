@@ -122,11 +122,17 @@
     }
     html {
         font-family: var(--font-sans);
+        margin: 0;
+        width: 100%;
+        height: 100%;
     }
     body {
         @apply bg-background text-foreground antialiased;
         font-family: var(--font-sans);
         overflow-y: scroll;
+        margin: 0;
+        width: 100%;
+        height: 100%;
     }
     code, pre, kbd, samp {
         font-family: var(--font-mono);

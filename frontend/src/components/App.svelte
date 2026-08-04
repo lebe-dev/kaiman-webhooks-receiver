@@ -11,6 +11,7 @@
         TabsContent,
     } from "$lib/components/ui/tabs";
     import { Toaster } from "$lib/components/ui/sonner";
+    import { ModeWatcher } from "mode-watcher";
     import { FishingHook, Bug, ListOrdered, LogOut, Info } from "@lucide/svelte";
     import { Button } from "$lib/components/ui/button/index.js";
     import { fetchConfig, type AppConfigResponse } from "$lib/api";
@@ -74,6 +75,7 @@
     }
 </script>
 
+<ModeWatcher />
 <Toaster />
 <TokenGate>
     <div class="p-6 max-w-5xl mx-auto">

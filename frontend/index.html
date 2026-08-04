@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width" />
+        <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+        <link rel="icon" href="/favicon.ico" />
+        <title>Kaiman Webhooks Proxy</title>
+        <script>
+            const isBrowser = typeof localStorage !== "undefined";
+
+            if (isBrowser) {
+                // Set mode-watcher defaults to light theme if not already set
+                if (!localStorage.getItem("mode-watcher-mode")) {
+                    localStorage.setItem("mode-watcher-mode", "light");
+                }
+                if (!localStorage.getItem("mode-watcher-theme")) {
+                    localStorage.setItem("mode-watcher-theme", "light");
+                }
+            }
+
+            const getThemePreference = () => {
+                if (isBrowser && localStorage.getItem("theme")) {
+                    return localStorage.getItem("theme");
+                }
+                return "light";
+            };
+            const isDark = getThemePreference() === "dark";
+            document.documentElement.classList[isDark ? "add" : "remove"](
+                "dark",
+            );
+
+            if (isBrowser) {
+                const observer = new MutationObserver(() => {
+                    const isDark =
+                        document.documentElement.classList.contains("dark");
+                    localStorage.setItem("theme", isDark ? "dark" : "light");
+                });
+                observer.observe(document.documentElement, {
+                    attributes: true,
+                    attributeFilter: ["class"],
+                });
+            }
+        </script>
+    </head>
+    <body>
+        <div id="app"></div>
+        <script type="module" src="/src/main.ts"></script>
+    </body>
+</html>

@@ -1,8 +1,5 @@
-# build output
+# build output (vite writes to ../static)
 dist/
-
-# generated types
-.astro/
 
 # dependencies
 node_modules/

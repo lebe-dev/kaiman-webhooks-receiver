@@ -28,6 +28,10 @@ lint-backend:
 lint-frontend:
     cd frontend && yarn lint
 
+# Type-check svelte components and TS sources
+check-frontend:
+    cd frontend && yarn typecheck
+
 lint: lint-backend && lint-frontend
 
 build: lint
@@ -47,17 +51,17 @@ run-backend:
     cargo run
 
 run-frontend:
-    cd frontend && yarn && npm run dev -- --port=4200
+    cd frontend && yarn && yarn dev --port=4200
 
 # FRONTEND
 
 frontend-install:
-    cd frontend && npm install
+    cd frontend && yarn install
 
 frontend-build:
     jq --arg v "{{ version }}" '.version = $v' frontend/package.json > frontend/package.json.tmp && \
         mv frontend/package.json.tmp frontend/package.json
-    cd frontend && npm run build
+    cd frontend && yarn build
 
 build-release: frontend-build lint
     cargo build --release
