@@ -1,6 +1,8 @@
 set dotenv-load
 
 version := `cat Cargo.toml | grep version | head -1 | cut -d " " -f 3 | tr -d "\""`
+commitHash := `git rev-parse --short HEAD`
+devVersion := version + "-" + commitHash
 image := 'tinyops/kwp'
 trivyReportFile := "docs/trivy-scan-report.txt"
 chartName := `cat helm-chart/Chart.yaml | yq -r '.name'`
@@ -106,3 +108,9 @@ build-release-image: test && lint
 
 release: build-release-image && trivy-save-reports
     docker push {{ image }}:{{ version }}
+
+build-release-image-dev: test && lint
+    docker build --progress=plain --platform=linux/amd64 -t {{ image }}:{{ devVersion }} .
+
+release-dev: build-release-image-dev
+    docker push {{ image }}:{{ devVersion }}
