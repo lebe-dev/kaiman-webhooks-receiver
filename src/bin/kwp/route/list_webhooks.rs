@@ -92,6 +92,10 @@ pub async fn list_webhooks_route(
                 .collect();
             (StatusCode::OK, Json(dtos)).into_response()
         }
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy listing webhooks for {}: {}", channel_name, e);
+            crate::route::storage_busy_response()
+        }
         Err(e) => {
             log::error!("Failed to list webhooks: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()

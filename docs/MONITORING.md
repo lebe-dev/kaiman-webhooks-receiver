@@ -59,7 +59,15 @@ Counts incoming webhook requests, labeled by channel and outcome.
 | `payload_too_large` | 413 | Request body exceeds the configured size limit |
 | `invalid_content_type` | 415 | `Content-Type` is not `application/json` |
 | `invalid_json` | 422 | Request body is not valid JSON |
+| `storage_busy` | 503 | Database write lock was held by someone else for longer than the retry budget. Nothing was stored; the sender is asked to redeliver via `Retry-After` |
 | `internal_error` | 500 | Database error or template rendering failure |
+
+A non-zero `storage_busy` rate means writers are contending for the SQLite lock
+longer than the adapter is willing to wait. It is not data loss on its own —
+senders that honour `Retry-After` will redeliver — but it signals that storage is
+the bottleneck. Usual causes are a slow or network-backed volume for `DATA_PATH`,
+or several KWP instances sharing one database file. See
+[Storage contention](CONFIG.md#storage-contention-sqlite-locking).
 
 ### `kwp_webhook_forward_total`
 

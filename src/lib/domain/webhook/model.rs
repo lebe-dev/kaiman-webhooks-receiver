@@ -51,8 +51,24 @@ impl Webhook {
 
 #[derive(Debug, Error)]
 pub enum WebhookRepositoryError {
+    /// The storage was too contended to serve the operation, and retrying inside
+    /// the adapter did not help.
+    ///
+    /// This is transient and carries no information about whether the data is
+    /// intact — nothing was written, and asking again later is expected to work.
+    /// Callers should translate it into "retry later" (HTTP 503) rather than a
+    /// failure, so that a webhook sender redelivers instead of dropping the event.
+    #[error("storage is busy: {0}")]
+    Busy(#[source] anyhow::Error),
+
     #[error("{0}")]
     Other(#[from] anyhow::Error),
+}
+
+impl WebhookRepositoryError {
+    pub fn is_busy(&self) -> bool {
+        matches!(self, Self::Busy(_))
+    }
 }
 
 #[derive(Debug, Error)]
@@ -84,6 +100,30 @@ pub enum QueueWebhooksError {
     #[error(transparent)]
     RepositoryError(#[from] WebhookRepositoryError),
 }
+
+/// Lets HTTP handlers answer "retry later" without having to know which
+/// repository error they are looking at.
+macro_rules! delegate_is_busy {
+    ($($error:ty),+ $(,)?) => {
+        $(
+            impl $error {
+                pub fn is_busy(&self) -> bool {
+                    match self {
+                        Self::RepositoryError(e) => e.is_busy(),
+                    }
+                }
+            }
+        )+
+    };
+}
+
+delegate_is_busy!(
+    ReceiveWebhookError,
+    ReadWebhooksError,
+    ListWebhooksError,
+    DeleteWebhookError,
+    QueueWebhooksError,
+);
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelForwardStatus {

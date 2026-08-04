@@ -201,6 +201,21 @@ pub async fn receive_webhook_route(
             inc_receive(&channel_name, "ok", channel_config.monitoring_metrics);
             (StatusCode::OK, "OK").into_response()
         }
+        // Nothing was stored and the condition is transient, so answer 503: the
+        // sender redelivers, whereas a 500 would silently drop the webhook.
+        Err(e) if e.is_busy() => {
+            log::warn!(
+                "storage busy, asking sender to redeliver webhook for channel {}: {}",
+                channel_name,
+                e
+            );
+            inc_receive(
+                &channel_name,
+                "storage_busy",
+                channel_config.monitoring_metrics,
+            );
+            crate::route::storage_busy_response()
+        }
         Err(e) => {
             log::error!(
                 "failed to store webhook for channel {}: {}",
@@ -315,6 +330,16 @@ mod tests {
         default_body_limit: usize,
         client_ip: IpAddr,
     ) -> Router {
+        let db = Sqlite::new("sqlite::memory:").await.unwrap();
+        build_app_with_db(channels, default_body_limit, client_ip, db)
+    }
+
+    fn build_app_with_db(
+        channels: Vec<WebhookChannelConfig>,
+        default_body_limit: usize,
+        client_ip: IpAddr,
+        db: Sqlite,
+    ) -> Router {
         let config = AppConfig {
             bind: "0.0.0.0:8080".to_string(),
             log_level: "info".to_string(),
@@ -336,7 +361,6 @@ mod tests {
             ui_enabled: true,
             api_enabled: true,
         };
-        let db = Sqlite::new("sqlite::memory:").await.unwrap();
         let state = Arc::new(AppState {
             config,
             webhook_service: WebhookServiceImpl::new(db),
@@ -369,6 +393,99 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         app.oneshot(req).await.unwrap().status()
+    }
+
+    /// Builds an app on a file-backed database whose write lock is already held,
+    /// so every write the handler attempts sees `SQLITE_BUSY`.
+    ///
+    /// The returned connection owns the lock; dropping it releases it.
+    async fn build_app_with_locked_db(
+        channels: Vec<WebhookChannelConfig>,
+    ) -> (Router, tempfile::TempDir, sqlx::SqliteConnection) {
+        use kwp_lib::outbound::sqlite::{LockRetryPolicy, SqliteTuning};
+        use sqlx::{Connection, Executor};
+        use std::time::Duration;
+
+        let dir = tempfile::tempdir().unwrap();
+        let url = format!("sqlite://{}/kwp.db?mode=rwc", dir.path().display());
+
+        // Short waits: this test is about the response, not about how long the
+        // adapter is willing to wait.
+        let tuning = SqliteTuning {
+            busy_timeout: Duration::from_millis(20),
+            retry: LockRetryPolicy {
+                max_attempts: 2,
+                initial_backoff: Duration::from_millis(5),
+                max_backoff: Duration::from_millis(5),
+                budget: Duration::from_millis(100),
+            },
+            ..SqliteTuning::default()
+        };
+        let db = Sqlite::new_with_tuning(&url, tuning).await.unwrap();
+
+        let mut lock = sqlx::SqliteConnection::connect(&url).await.unwrap();
+        lock.execute("BEGIN EXCLUSIVE").await.unwrap();
+
+        let app = build_app_with_db(channels, 1024, "127.0.0.1".parse().unwrap(), db);
+
+        (app, dir, lock)
+    }
+
+    /// Webhook senders redeliver on 503 but treat 500 as a delivered-and-broken
+    /// event, so a lock collision must never be reported as 500.
+    #[tokio::test]
+    async fn test_busy_storage_returns_503_with_retry_after() {
+        let (app, _dir, _lock) = build_app_with_locked_db(vec![make_channel("test", None)]).await;
+
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/webhook/test")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(b"{}".to_vec()))
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok()),
+            Some("1"),
+            "the sender needs to be told when to come back"
+        );
+    }
+
+    /// The destructive poll deletes rows, so it needs the write lock too.
+    #[tokio::test]
+    async fn test_busy_storage_returns_503_when_polling() {
+        let (app, _dir, _lock) = build_app_with_locked_db(vec![make_channel("test", None)]).await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/webhook/test")
+            .header(http::header::AUTHORIZATION, "Bearer read-token")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A busy database must not be confused with an authentication failure or a
+    /// missing channel: those are checked first and answered on their own.
+    #[tokio::test]
+    async fn test_busy_storage_does_not_mask_auth_failures() {
+        let (app, _dir, _lock) = build_app_with_locked_db(vec![make_channel("test", None)]).await;
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/webhook/test")
+            .body(Body::empty())
+            .unwrap();
+        let response = app.oneshot(req).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

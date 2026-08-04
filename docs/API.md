@@ -24,6 +24,7 @@ Used by external services (GitHub, Telegram, etc.) to send webhooks to KWP.
     *   `200 OK`: Webhook received and stored.
     *   `401 Unauthorized`: Secret header missing or incorrect.
     *   `404 Not Found`: Channel name not found in configuration.
+    *   `503 Service Unavailable`: Storage was locked by a concurrent writer for longer than the retry budget. The webhook was **not** stored; a `Retry-After` header tells the sender when to redeliver.
     *   `500 Internal Server Error`: Failed to store the webhook.
 
 ### 2. Read and Delete Webhooks
@@ -41,6 +42,7 @@ Used by your local application or scripts to retrieve pending webhooks for a spe
     *   `200 OK`: Returns a JSON array of webhooks. **Note:** Webhooks are deleted from the proxy immediately after being successfully returned in this call.
     *   `401 Unauthorized`: Missing or invalid Bearer token.
     *   `403 Forbidden`: Token is valid but belongs to a different channel.
+    *   `503 Service Unavailable`: Storage was locked by a concurrent writer for longer than the retry budget. Nothing was deleted, so the same call can simply be repeated.
     *   `500 Internal Server Error`: Database error.
 
 #### Response Schema

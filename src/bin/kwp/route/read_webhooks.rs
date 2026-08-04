@@ -95,6 +95,11 @@ pub async fn read_webhooks_route(
                 .collect();
             (StatusCode::OK, Json(dtos)).into_response()
         }
+        // Nothing was deleted, so the client can safely poll again.
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy reading webhooks for {}: {}", channel_name, e);
+            crate::route::storage_busy_response()
+        }
         Err(e) => {
             log::error!("Failed to read webhooks: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()

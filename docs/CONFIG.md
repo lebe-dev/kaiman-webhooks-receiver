@@ -111,6 +111,42 @@ channels:
     api-read-token: "token"
 ```
 
+## Storage contention (SQLite locking)
+
+SQLite allows exactly one writer at a time. KWP writes on every received webhook,
+on every forwarding attempt and on every successful delivery, so writers do collide
+under load. The storage adapter is configured to absorb this without operator
+intervention:
+
+| Setting | Value | Why |
+| :--- | :--- | :--- |
+| `journal_mode` | `WAL` | Readers never block on the writer, so polling and the Web UI stay responsive while webhooks are being stored. |
+| `synchronous` | `NORMAL` | The recommended companion to WAL. Removes the per-commit `fsync`, which is what keeps the write lock held. An OS crash or power loss can lose the most recent commits; the database itself stays intact, and an application crash loses nothing. |
+| `busy_timeout` | 2s | How long SQLite waits for the lock before reporting `SQLITE_BUSY`. |
+| Retry budget | 4s | Statements that still hit the lock are retried with exponential backoff and jitter. |
+| Pool size | 8 connections | Writes serialise regardless, so a larger pool would only add waiters. |
+| Acquire timeout | 3s | sqlx defaults to 30s, which outlives a webhook sender's own timeout. |
+
+The worst case (2s + 3s + 4s) stays below the ~10s a sender such as GitHub waits, so
+a request always gets an answer in time for the sender to react.
+
+If contention outlives the retry budget, the request is answered with
+**`503 Service Unavailable` and a `Retry-After` header** rather than `500`. Nothing
+was written in that case, so a redelivery cannot duplicate anything. The
+`kwp_webhook_receive_total{status="storage_busy"}` metric counts these; see
+[MONITORING.md](MONITORING.md#kwp_webhook_receive_total).
+
+Recommendations for avoiding contention in the first place:
+
+- **Keep `DATA_PATH` on a local disk.** Network filesystems (NFS, SMB) implement
+  file locking unreliably and are the most common source of persistent lock errors.
+- **Run a single KWP instance per database file.** Two instances sharing one file
+  double the write pressure and serialise against each other. Scale by giving each
+  instance its own database, not by adding replicas over a shared volume.
+- **Avoid clearing very large queues during traffic peaks.**
+  `POST /api/webhook/{channel}/queue/clear` is the longest write the service
+  performs.
+
 ## What's next
 
 - [Integration guides](INTEGRATIONS.md)

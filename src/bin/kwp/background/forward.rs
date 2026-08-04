@@ -237,9 +237,10 @@ pub async fn run_forwarder<R: WebhookRepository>(
                                 forward_cfg.url
                             );
                             inc_forward(&channel, "ok", monitoring_metrics);
-                            if let Err(e) = repo.delete_by_id(id).await {
+                            let removed = repo.delete_by_id(id).await;
+                            if let Err(e) = &removed {
                                 log::error!(
-                                    "[forwarder:{}] delete_by_id({}) failed: {}",
+                                    "[forwarder:{}] delete_by_id({}) failed, webhook stays queued and will be delivered again: {}",
                                     channel.as_str(),
                                     id,
                                     e
@@ -249,6 +250,14 @@ pub async fn run_forwarder<R: WebhookRepository>(
                                 s.last_success_at = Some(now_unix());
                                 s.queue_size = (s.queue_size - 1).max(0);
                             });
+
+                            // The webhook was delivered but is still queued, so the
+                            // next iteration would peek the same row and deliver it
+                            // twice in a row. Back off instead and give whatever
+                            // held the lock a chance to let go.
+                            if removed.is_err() {
+                                tokio::time::sleep(interval).await;
+                            }
                         } else {
                             let body = resp
                                 .text()

@@ -103,6 +103,10 @@ pub async fn get_queue_route(
 
     let webhooks = match state.webhook_service.list_queue(&channel).await {
         Ok(w) => w,
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy listing queue for {}: {}", channel_name, e);
+            return crate::route::storage_busy_response();
+        }
         Err(e) => {
             log::error!("Failed to list queue for channel {}: {}", channel_name, e);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
@@ -246,6 +250,10 @@ pub async fn clear_queue_route(
 
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy clearing queue for {}: {}", channel_name, e);
+            crate::route::storage_busy_response()
+        }
         Err(e) => {
             log::error!("Failed to clear queue for channel {}: {}", channel_name, e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
@@ -300,6 +308,10 @@ pub async fn retry_webhook_route(
     let webhook = match state.webhook_service.get_webhook(webhook_id).await {
         Ok(Some(w)) => w,
         Ok(None) => return (StatusCode::NOT_FOUND, "Webhook not found").into_response(),
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy fetching webhook {}: {}", webhook_id, e);
+            return crate::route::storage_busy_response();
+        }
         Err(e) => {
             log::error!("Failed to get webhook {}: {}", webhook_id, e);
             return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();

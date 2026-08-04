@@ -74,6 +74,10 @@ pub async fn delete_webhook_route(
             );
             StatusCode::NO_CONTENT.into_response()
         }
+        Err(e) if e.is_busy() => {
+            log::warn!("storage busy deleting webhook {}: {}", webhook_id, e);
+            crate::route::storage_busy_response()
+        }
         Err(e) => {
             log::error!("Failed to delete webhook: {}", e);
             (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
