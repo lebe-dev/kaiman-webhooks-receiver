@@ -519,17 +519,47 @@ impl From<AppConfig> for AppConfigDto {
     }
 }
 
+/// The retry schedule of one channel, with per-channel overrides already resolved
+/// over the global defaults — the UI shows what the forwarder actually uses, not
+/// what the YAML happens to spell out.
+#[derive(PartialEq, Serialize, Clone, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct ForwardBackoffDto {
+    pub multiplier: f64,
+    pub max_seconds: u64,
+    pub jitter: f64,
+}
+
+/// Everything about a channel the UI is allowed to see.
+///
+/// **Secrets never appear here** — only `has*` flags saying whether one is
+/// configured, because "is a secret set at all" is what an operator needs to
+/// answer and the value itself is a credential.
 #[derive(PartialEq, Serialize, Clone, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct ChannelConfigDto {
     pub name: String,
     pub secret_type: String,
     pub secret_header: Option<String>,
+    /// A `webhook-secret` is configured for this channel — the value stays server side.
+    pub has_secret: bool,
     pub has_forward: bool,
     pub forward_url: Option<String>,
     pub sign_header: Option<String>,
+    /// Forwarded requests are signed with a dedicated `sign-secret` rather than
+    /// falling back to the channel's `webhook-secret`.
+    pub has_sign_secret: bool,
     pub expected_status: Option<u16>,
     pub timeout_seconds: Option<u64>,
+    /// How long the forwarder waits between passes over the queue, and the delay
+    /// before the first retry.
+    pub interval_seconds: Option<u64>,
+    pub backoff: Option<ForwardBackoffDto>,
+    /// Body limit in effect for this channel: its own `max-body-size`, or the
+    /// global default when it has none.
+    pub max_body_size: usize,
+    /// `null` means every source IP is accepted.
+    pub allowed_ips: Option<Vec<String>>,
     pub monitoring_metrics: bool,
     pub note: Option<String>,
 }
@@ -546,25 +576,33 @@ impl From<&AppConfig> for AppConfigPublicDto {
             .channels
             .iter()
             .map(|ch| {
-                let (forward_url, sign_header, expected_status, timeout_seconds) = match &ch.forward
-                {
-                    Some(f) => (
-                        Some(f.url.clone()),
-                        f.sign_header.clone(),
-                        Some(f.expected_status),
-                        Some(f.timeout_seconds),
-                    ),
-                    None => (None, None, None, None),
-                };
+                let backoff = ch.forward.as_ref().map(|f| {
+                    let resolved = f.backoff(&config.forward_backoff);
+                    ForwardBackoffDto {
+                        multiplier: resolved.multiplier,
+                        max_seconds: resolved.max.as_secs(),
+                        jitter: resolved.jitter,
+                    }
+                });
+
                 ChannelConfigDto {
                     name: ch.name.clone(),
                     secret_type: ch.secret_type.to_string(),
                     secret_header: ch.secret_header.clone(),
+                    has_secret: ch.webhook_secret.is_some(),
                     has_forward: ch.forward.is_some(),
-                    forward_url,
-                    sign_header,
-                    expected_status,
-                    timeout_seconds,
+                    forward_url: ch.forward.as_ref().map(|f| f.url.clone()),
+                    sign_header: ch.forward.as_ref().and_then(|f| f.sign_header.clone()),
+                    has_sign_secret: ch
+                        .forward
+                        .as_ref()
+                        .is_some_and(|f| f.sign_secret.is_some()),
+                    expected_status: ch.forward.as_ref().map(|f| f.expected_status),
+                    timeout_seconds: ch.forward.as_ref().map(|f| f.timeout_seconds),
+                    interval_seconds: ch.forward.as_ref().map(|f| f.interval_seconds),
+                    backoff,
+                    max_body_size: ch.max_body_size.unwrap_or(config.default_body_limit),
+                    allowed_ips: ch.allowed_ips.clone(),
                     monitoring_metrics: ch.monitoring_metrics,
                     note: ch.note.clone(),
                 }
@@ -1258,5 +1296,83 @@ backoff:
             error.contains("FORWARD_BACKOFF_"),
             "the message must point at the environment variable, got: {error}"
         );
+    }
+
+    /// The UI explains the retry schedule to the operator, so it needs the values the
+    /// forwarder actually uses — including the ones inherited from the global defaults.
+    #[test]
+    fn test_public_dto_exposes_the_resolved_retry_schedule() {
+        let mut forward = make_forward(30);
+        forward.backoff = Some(ForwardBackoffOverrides {
+            max_seconds: Some(600),
+            ..Default::default()
+        });
+        let config = make_app_config(262_144, vec![make_channel_with_forward(forward)]);
+        let defaults = config.forward_backoff.clone();
+
+        let dto = AppConfigPublicDto::from(&config);
+        let channel = &dto.channels[0];
+
+        assert_eq!(channel.interval_seconds, Some(30));
+        let backoff = channel.backoff.clone().expect("a forwarding channel retries");
+        assert_eq!(backoff.max_seconds, 600, "the channel override must win");
+        assert_eq!(
+            backoff.multiplier, defaults.multiplier,
+            "an unset field must show the inherited default, not nothing"
+        );
+        assert_eq!(backoff.jitter, defaults.jitter);
+    }
+
+    /// Body limits are resolved the same way: a channel without its own limit is
+    /// subject to the global one, and that is what the UI has to display.
+    #[test]
+    fn test_public_dto_reports_the_effective_body_limit() {
+        let config = make_app_config(
+            262_144,
+            vec![make_channel("a", None), make_channel("b", Some(1_048_576))],
+        );
+
+        let dto = AppConfigPublicDto::from(&config);
+
+        assert_eq!(dto.channels[0].max_body_size, 262_144);
+        assert_eq!(dto.channels[1].max_body_size, 1_048_576);
+    }
+
+    /// The public config is served to anyone holding a UI token, so a secret that
+    /// leaks into it is a credential handed to every operator's browser.
+    #[test]
+    fn test_public_dto_never_carries_secret_values() {
+        let mut forward = make_forward(30);
+        forward.sign_header = Some("X-Signature".to_string());
+        forward.sign_secret = Some("sign-secret-value".to_string());
+        forward.sign_template = Some("sha256={{signature}}".to_string());
+
+        let mut channel = make_channel_with_forward(forward);
+        channel.api_read_token = "read-token-value".to_string();
+        channel.webhook_secret = Some("webhook-secret-value".to_string());
+        channel.secret_extract_template = Some("extract-template-value".to_string());
+        channel.secret_sign_template = Some("sign-template-value".to_string());
+
+        let config = make_app_config(262_144, vec![channel]);
+        let json = serde_json::to_string(&AppConfigPublicDto::from(&config)).unwrap();
+
+        for secret in [
+            "read-token-value",
+            "webhook-secret-value",
+            "sign-secret-value",
+            "extract-template-value",
+            "sign-template-value",
+            "{{signature}}",
+        ] {
+            assert!(
+                !json.contains(secret),
+                "public config leaked {secret}: {json}"
+            );
+        }
+
+        let dto = AppConfigPublicDto::from(&config);
+        assert!(dto.channels[0].has_secret);
+        assert!(dto.channels[0].has_sign_secret);
+        assert_eq!(dto.channels[0].sign_header.as_deref(), Some("X-Signature"));
     }
 }

@@ -8,13 +8,31 @@
     retryWebhook,
     deleteWebhook,
     type QueueItem,
+    type ChannelConfig,
     type ChannelForwardStatus,
   } from "$lib/api";
-  import { Button } from "$lib/components/ui/button";
+  import { buttonVariants } from "$lib/components/ui/button";
+  import { Input } from "$lib/components/ui/input";
+  import {
+    AlertDialog,
+    AlertDialogAction,
+    AlertDialogCancel,
+    AlertDialogContent,
+    AlertDialogDescription,
+    AlertDialogFooter,
+    AlertDialogHeader,
+    AlertDialogTitle,
+  } from "$lib/components/ui/alert-dialog";
   import { toast } from "svelte-sonner";
   import { RotateCw, Pause, Play, Trash2, RefreshCw } from "@lucide/svelte";
+  import Hint from "./Hint.svelte";
+  import QueueHelp from "./QueueHelp.svelte";
+  import { formatSeconds } from "$lib/format";
 
-  let { channel }: { channel: string } = $props();
+  let {
+    channel,
+    channelConfig,
+  }: { channel: string; channelConfig: ChannelConfig } = $props();
 
   let items = $state<QueueItem[]>([]);
   let status = $state<ChannelForwardStatus>({
@@ -33,6 +51,42 @@
   let nowTs = $state(Math.floor(Date.now() / 1000));
 
   let lastItemsJson = "";
+
+  // Kept out of the markup so the explanations stay readable and can hold line breaks.
+  const HINT = {
+    queueSize:
+      "Webhooks stored for this channel and not yet delivered — including the ones waiting out a retry delay.",
+    status:
+      "Active — the forwarder is delivering, or will on its next pass.\nBacking off — every queued webhook is waiting out a retry delay; nothing is sent until the soonest one is due.\nPaused — delivery is stopped by hand; incoming webhooks still pile up.",
+    lastSuccess:
+      "When this channel last got the expected status from the target. Resets to “never” on restart — it is not read back from the database.",
+    lastError:
+      "The most recent failed attempt on this channel, whichever webhook it was. Per-webhook errors are on the item itself.",
+    refresh:
+      "Reload the queue now. It also refreshes on its own every 5 seconds.",
+    pause:
+      "Stop delivery attempts for this channel. Incoming webhooks keep arriving and wait in the queue. The state is held in memory only — a restart resumes forwarding.",
+    resume:
+      "Resume delivery. Webhooks that arrived while paused are sent oldest first.",
+    clear:
+      "Permanently delete every queued webhook for this channel. They are never delivered. Asks for the channel name first.",
+    clearEmpty: "The queue is already empty.",
+    isNew: "Never sent yet — it goes out on the forwarder's next pass.",
+    lastAttemptFailed:
+      "The last attempt failed. Open the item to read the response the target gave.",
+    waiting:
+      "This webhook is waiting out its backoff and is skipped until then. Others in the queue are still delivered meanwhile.\nRetry now sends it immediately, ignoring the delay.",
+    retryNow:
+      "Send this webhook right now, ignoring its retry delay. On success it leaves the queue; on failure the delay is extended as usual.",
+    deleteItem:
+      "Drop this webhook without delivering it. This cannot be undone.",
+  };
+
+  let maxDelayLabel = $derived(
+    channelConfig.backoff
+      ? formatSeconds(channelConfig.backoff.maxSeconds)
+      : "the cap",
+  );
 
   async function load(silent = false) {
     if (!silent) loading = true;
@@ -97,15 +151,34 @@
     }
   }
 
+  // Clearing deletes undelivered webhooks for good, so it asks for the channel name
+  // rather than a yes/no the operator can click through by reflex.
+  let clearDialogOpen = $state(false);
+  let clearConfirmation = $state("");
+  let clearing = $state(false);
+  let clearConfirmed = $derived(clearConfirmation.trim() === channel);
+
+  function openClearDialog() {
+    clearConfirmation = "";
+    clearDialogOpen = true;
+  }
+
   async function handleClear() {
-    if (!confirm("Clear all items from the queue?")) return;
+    if (!clearConfirmed) return;
+    clearing = true;
+    const deleted = items.length;
     try {
       await clearQueue(channel);
       items = [];
-      toast.success("Queue cleared");
+      clearDialogOpen = false;
+      toast.success(
+        `Queue cleared — ${deleted} webhook${deleted !== 1 ? "s" : ""} deleted`,
+      );
       await load();
     } catch {
       toast.error("Failed to clear queue");
+    } finally {
+      clearing = false;
     }
   }
 
@@ -156,14 +229,26 @@
 </script>
 
 <div class="space-y-4">
+  <QueueHelp config={channelConfig} />
+
   <!-- Status panel -->
   <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
     <div class="rounded-lg border bg-card text-card-foreground shadow-card p-3 space-y-1">
-      <div class="text-xs text-muted-foreground">Queue size</div>
+      <div class="flex items-center gap-1 text-xs text-muted-foreground">
+        Queue size
+        <Hint
+          text={HINT.queueSize}
+        />
+      </div>
       <div class="text-2xl font-semibold">{status.queue_size}</div>
     </div>
     <div class="rounded-lg border bg-card text-card-foreground shadow-card p-3 space-y-1">
-      <div class="text-xs text-muted-foreground">Status</div>
+      <div class="flex items-center gap-1 text-xs text-muted-foreground">
+        Status
+        <Hint
+          text={HINT.status}
+        />
+      </div>
       <div class="text-sm font-medium">
         {#if status.paused}
           <span class="inline-flex items-center gap-1.5 text-yellow-600 dark:text-yellow-400">
@@ -189,11 +274,21 @@
       {/if}
     </div>
     <div class="rounded-lg border bg-card text-card-foreground shadow-card p-3 space-y-1">
-      <div class="text-xs text-muted-foreground">Last success</div>
+      <div class="flex items-center gap-1 text-xs text-muted-foreground">
+        Last success
+        <Hint
+          text={HINT.lastSuccess}
+        />
+      </div>
       <div class="text-sm font-medium">{relativeTime(status.last_success_at)}</div>
     </div>
     <div class="rounded-lg border bg-card text-card-foreground shadow-card p-3 space-y-1">
-      <div class="text-xs text-muted-foreground">Last error</div>
+      <div class="flex items-center gap-1 text-xs text-muted-foreground">
+        Last error
+        <Hint
+          text={HINT.lastError}
+        />
+      </div>
       <div class="text-sm font-medium">
         {relativeTime(status.last_error_at)}
       </div>
@@ -207,18 +302,18 @@
 
   <!-- Controls row -->
   <div class="flex items-center gap-2 flex-wrap">
-    <Button
-      variant="outline"
-      size="sm"
+    <Hint
+      text={HINT.refresh}
       onclick={() => load()}
       disabled={loading}
+      class={buttonVariants({ variant: "outline", size: "sm" })}
     >
       <RotateCw size={16} class={loading ? "animate-spin" : ""} />
-    </Button>
-    <Button
-      variant="outline"
-      size="sm"
+    </Hint>
+    <Hint
+      text={status.paused ? HINT.resume : HINT.pause}
       onclick={handlePauseResume}
+      class={buttonVariants({ variant: "outline", size: "sm" })}
     >
       {#if status.paused}
         <Play size={16} />
@@ -227,17 +322,16 @@
         <Pause size={16} />
         <span class="ml-1">Pause</span>
       {/if}
-    </Button>
-    {#if items.length > 0}
-      <Button
-        variant="destructive"
-        size="sm"
-        onclick={handleClear}
-      >
-        <Trash2 size={16} />
-        <span class="ml-1">Clear Queue</span>
-      </Button>
-    {/if}
+    </Hint>
+    <Hint
+      text={items.length === 0 ? HINT.clearEmpty : HINT.clear}
+      onclick={openClearDialog}
+      disabled={items.length === 0}
+      class={buttonVariants({ variant: "destructive", size: "sm" })}
+    >
+      <Trash2 size={16} />
+      <span class="ml-1">Clear Queue…</span>
+    </Hint>
     <span class="text-sm text-muted-foreground">
       {items.length} item{items.length !== 1 ? "s" : ""}
     </span>
@@ -260,23 +354,35 @@
               <div class="flex items-center gap-2 flex-wrap min-w-0">
                 <span class="text-xs text-muted-foreground font-mono">#{item.id}</span>
                 {#if item.forward_attempts === 0}
-                  <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2 py-0.5 text-xs font-medium text-green-700 dark:text-green-400">
-                    new
-                  </span>
+                  <Hint text={HINT.isNew}>
+                    <span class="inline-flex items-center rounded-full bg-green-100 dark:bg-green-900/30 px-2 py-0.5 text-xs font-medium text-green-700 dark:text-green-400">
+                      new
+                    </span>
+                  </Hint>
                 {:else}
-                  <span class="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-900/30 px-2 py-0.5 text-xs font-medium text-purple-700 dark:text-purple-400">
-                    {item.forward_attempts} attempt{item.forward_attempts !== 1 ? "s" : ""}
-                  </span>
+                  <Hint
+                    text={`Failed delivery attempts so far. Each one lengthens this webhook's own retry delay, up to ${maxDelayLabel}.`}
+                  >
+                    <span class="inline-flex items-center rounded-full bg-purple-100 dark:bg-purple-900/30 px-2 py-0.5 text-xs font-medium text-purple-700 dark:text-purple-400">
+                      {item.forward_attempts} attempt{item.forward_attempts !== 1 ? "s" : ""}
+                    </span>
+                  </Hint>
                 {/if}
                 {#if item.last_attempt_error}
-                  <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-400">
-                    error
-                  </span>
+                  <Hint text={HINT.lastAttemptFailed}>
+                    <span class="inline-flex items-center rounded-full bg-red-100 dark:bg-red-900/30 px-2 py-0.5 text-xs font-medium text-red-700 dark:text-red-400">
+                      error
+                    </span>
+                  </Hint>
                 {/if}
                 {#if timeUntil(item.next_attempt_at)}
-                  <span class="inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/30 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
-                    retry in {timeUntil(item.next_attempt_at)}
-                  </span>
+                  <Hint
+                    text={HINT.waiting}
+                  >
+                    <span class="inline-flex items-center rounded-full bg-amber-100 dark:bg-amber-900/30 px-2 py-0.5 text-xs font-medium text-amber-700 dark:text-amber-400">
+                      retry in {timeUntil(item.next_attempt_at)}
+                    </span>
+                  </Hint>
                 {/if}
               </div>
               <div class="flex items-center gap-2 shrink-0">
@@ -286,25 +392,21 @@
                     &middot; last attempt {relativeTime(item.last_attempt_at)}
                   {/if}
                 </span>
-                <Button
-                  variant="ghost"
-                  size="sm"
+                <Hint
+                  text={HINT.retryNow}
                   onclick={(e: MouseEvent) => { e.stopPropagation(); handleRetry(item.id); }}
                   disabled={retrying === item.id}
-                  title="Retry"
-                  class="h-7 px-2"
+                  class="{buttonVariants({ variant: 'ghost', size: 'sm' })} h-7 px-2"
                 >
                   <RefreshCw class="w-3.5 h-3.5 {retrying === item.id ? 'animate-spin' : ''}" />
-                </Button>
-                <Button
-                  variant="ghost"
-                  size="sm"
+                </Hint>
+                <Hint
+                  text={HINT.deleteItem}
                   onclick={(e: MouseEvent) => { e.stopPropagation(); handleDelete(item.id); }}
-                  title="Delete"
-                  class="h-7 px-2 text-destructive hover:text-destructive hover:bg-destructive/10"
+                  class="{buttonVariants({ variant: 'ghost', size: 'sm' })} h-7 px-2 text-destructive hover:text-destructive hover:bg-destructive/10"
                 >
                   <Trash2 class="w-3.5 h-3.5" />
-                </Button>
+                </Hint>
               </div>
             </div>
           </div>
@@ -340,3 +442,44 @@
     </div>
   {/if}
 </div>
+
+<AlertDialog bind:open={clearDialogOpen}>
+  <AlertDialogContent class="max-w-md sm:max-w-md">
+    <AlertDialogHeader>
+      <AlertDialogTitle>Clear the queue of “{channel}”?</AlertDialogTitle>
+      <AlertDialogDescription>
+        {items.length} queued webhook{items.length !== 1 ? "s" : ""} will be deleted
+        from the database and never delivered to
+        <span class="font-mono">{channelConfig.forwardUrl}</span>. Payloads are not
+        kept anywhere else — this cannot be undone.
+      </AlertDialogDescription>
+    </AlertDialogHeader>
+
+    <div class="space-y-2 py-2">
+      <label class="text-sm text-muted-foreground" for="clear-confirm">
+        Type <span class="font-mono font-medium text-foreground">{channel}</span> to confirm
+      </label>
+      <Input
+        id="clear-confirm"
+        bind:value={clearConfirmation}
+        autocomplete="off"
+        spellcheck={false}
+        placeholder={channel}
+      />
+    </div>
+
+    <AlertDialogFooter>
+      <AlertDialogCancel>Cancel</AlertDialogCancel>
+      <AlertDialogAction
+        variant="destructive"
+        disabled={!clearConfirmed || clearing}
+        onclick={(e: MouseEvent) => {
+          e.preventDefault();
+          handleClear();
+        }}
+      >
+        {clearing ? "Deleting…" : `Delete ${items.length} webhook${items.length !== 1 ? "s" : ""}`}
+      </AlertDialogAction>
+    </AlertDialogFooter>
+  </AlertDialogContent>
+</AlertDialog>

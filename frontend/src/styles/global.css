@@ -7,6 +7,12 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* bits-ui reports open state as data-state="open|closed", while the shadcn components
+   are written against the shorter data-open / data-closed variants. Without this
+   mapping the tooltip and dialog transitions simply never fire. */
+@custom-variant data-open (&[data-state="open"]);
+@custom-variant data-closed (&[data-state="closed"]);
+
 :root {
     --radius: 0.65rem;
     --background: oklch(0.985 0.003 80);

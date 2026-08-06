@@ -4,12 +4,14 @@
     import WebhooksList from "./WebhooksList.svelte";
     import DebugSend from "./DebugSend.svelte";
     import QueueView from "./QueueView.svelte";
+    import ChannelConfigCard from "./ChannelConfigCard.svelte";
     import {
         Tabs,
         TabsList,
         TabsTrigger,
         TabsContent,
     } from "$lib/components/ui/tabs";
+    import { TooltipProvider } from "$lib/components/ui/tooltip";
     import { Toaster } from "$lib/components/ui/sonner";
     import { ModeWatcher } from "mode-watcher";
     import { FishingHook, Bug, ListOrdered, LogOut, Info } from "@lucide/svelte";
@@ -77,6 +79,7 @@
 
 <ModeWatcher />
 <Toaster />
+<TooltipProvider delayDuration={200}>
 <TokenGate>
     <div class="p-6 max-w-5xl mx-auto">
             <div class="flex items-center justify-between mb-6">
@@ -133,11 +136,9 @@
                     </div>
                 {/if}
 
-                {#if currentChannelConfig && !currentChannelConfig.monitoringMetrics}
-                    <div
-                        class="mb-4 rounded-lg border border-amber-500/50 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-400"
-                    >
-                        Prometheus metrics are disabled for this channel.
+                {#if currentChannelConfig}
+                    <div class="mb-4">
+                        <ChannelConfigCard config={currentChannelConfig} />
                     </div>
                 {/if}
 
@@ -176,8 +177,11 @@
                         {/if}
                     </TabsContent>
                     <TabsContent value="queue">
-                        {#if selectedChannel && currentChannelHasForward}
-                            <QueueView channel={selectedChannel} />
+                        {#if selectedChannel && currentChannelConfig && currentChannelHasForward}
+                            <QueueView
+                                channel={selectedChannel}
+                                channelConfig={currentChannelConfig}
+                            />
                         {/if}
                     </TabsContent>
                 </Tabs>
@@ -199,3 +203,4 @@
             </footer>
         </div>
 </TokenGate>
+</TooltipProvider>

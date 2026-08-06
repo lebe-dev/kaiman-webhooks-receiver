@@ -4,6 +4,7 @@
   import { Button } from "$lib/components/ui/button";
   import { toast } from "svelte-sonner";
   import { RotateCw, Copy, Trash2 } from "@lucide/svelte";
+  import Hint from "./Hint.svelte";
 
   let { channel, onCopyToDebug }: { channel: string; onCopyToDebug?: (payload: string) => void } = $props();
 
@@ -76,8 +77,11 @@
     >
       <RotateCw size={16} />
     </Button>
-    <span class="text-sm text-muted-foreground">
+    <span class="flex items-center gap-1 text-sm text-muted-foreground">
       {webhooks.length} webhook{webhooks.length !== 1 ? "s" : ""}
+      <Hint
+        text={`Everything currently stored for this channel — reading it here changes nothing.\nA client polling GET /api/webhook/${channel} receives and deletes them in one call instead.\nOn a forwarding channel these are the same rows the Queue tab works with: they disappear once the target accepts them.`}
+      />
     </span>
   </div>
 

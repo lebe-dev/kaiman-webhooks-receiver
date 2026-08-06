@@ -19,15 +19,33 @@ async function apiFetch(
   return res;
 }
 
+/** Retry schedule of a channel, with global defaults already resolved server side. */
+export interface ForwardBackoffConfig {
+  multiplier: number;
+  maxSeconds: number;
+  jitter: number;
+}
+
 export interface ChannelConfig {
   name: string;
   secretType: string;
   secretHeader: string | null;
+  /** A secret is configured; its value never leaves the server. */
+  hasSecret: boolean;
   hasForward: boolean;
   forwardUrl: string | null;
   signHeader: string | null;
+  /** Forwards are signed with a dedicated sign-secret instead of the channel secret. */
+  hasSignSecret: boolean;
   expectedStatus: number | null;
   timeoutSeconds: number | null;
+  /** Pause between queue passes, and the delay before the first retry. */
+  intervalSeconds: number | null;
+  backoff: ForwardBackoffConfig | null;
+  /** Effective body limit in bytes: the channel's own, or the global default. */
+  maxBodySize: number;
+  /** null means every source IP is accepted. */
+  allowedIps: string[] | null;
   monitoringMetrics: boolean;
   note: string | null;
 }
