@@ -218,7 +218,7 @@ mod tests {
 
         assert_eq!(config.db_cnn, "sqlite:test.db");
         assert_eq!(config.bind, "0.0.0.0:8080"); // default
-        assert!(config.channels.len() >= 1);
+        assert!(!config.channels.is_empty());
         assert_eq!(config.channels[0].name, "test");
 
         unsafe {

@@ -24,7 +24,9 @@ serviceAccount:
   # Specifies whether a service account should be created.
   create: true
   # Automatically mount a ServiceAccount's API credentials?
-  automount: true
+  # KWP never talks to the Kubernetes API, so the token is off by default —
+  # a mounted token is a credential an attacker could reuse after an RCE.
+  automount: false
   # Annotations to add to the service account.
   annotations: {}
   # The name of the service account to use.
@@ -126,17 +128,20 @@ httpRoute:
   #     - name: version
   #       value: v2
 
-resources: {}
-  # We usually recommend not to specify default resources and to leave this as a conscious
-  # choice for the user. This also increases chances charts run on environments with little
-  # resources, such as Minikube. If you do want to specify resources, uncomment the following
-  # lines, adjust them as necessary, and remove the curly braces after 'resources:'.
-  # limits:
-  #   cpu: 100m
-  #   memory: 128Mi
-  # requests:
-  #   cpu: 100m
-  #   memory: 128Mi
+# Sized for the actual workload: a single Rust binary that proxies webhooks and
+# keeps them in SQLite. Requests are what the scheduler reserves; limits are the
+# ceiling before the container is killed (memory) or evicted (ephemeral-storage).
+# There is deliberately no CPU limit — a forwarding burst should be allowed to use
+# idle CPU rather than be throttled. Raise `limits.ephemeral-storage` if logs go
+# to a file (LOG_TARGET) instead of stdout.
+resources:
+  limits:
+    memory: 128Mi
+    ephemeral-storage: 512Mi
+  requests:
+    cpu: 50m
+    memory: 64Mi
+    ephemeral-storage: 128Mi
 
 # This is to setup the liveness and readiness probes more information can be found here: https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/
 livenessProbe:

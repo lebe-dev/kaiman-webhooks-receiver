@@ -1,8 +1,8 @@
 const TOKEN_COOKIE = "kwp_token";
 
 export function getToken(): string | null {
-  const match = document.cookie.match(
-    new RegExp(`(?:^|; )${TOKEN_COOKIE}=([^;]*)`)
+  const match = new RegExp(`(?:^|; )${TOKEN_COOKIE}=([^;]*)`).exec(
+    document.cookie
   );
   return match ? decodeURIComponent(match[1]) : null;
 }

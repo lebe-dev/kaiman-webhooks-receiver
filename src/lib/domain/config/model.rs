@@ -262,6 +262,75 @@ pub struct AppConfig {
     pub forward_backoff: ForwardBackoffDefaults,
 }
 
+/// `hmac-sha256` verification needs both a secret to compute the signature and a
+/// header to compare it against; either one missing makes the channel unverifiable.
+fn validate_channel_secret(ch: &WebhookChannelConfig) -> Result<(), String> {
+    if ch.secret_type != SecretType::HmacSha256 {
+        return Ok(());
+    }
+    if ch.webhook_secret.is_none() {
+        return Err(format!(
+            "channel '{}': hmac-sha256 requires webhook-secret",
+            ch.name
+        ));
+    }
+    if ch.secret_header.is_none() {
+        return Err(format!(
+            "channel '{}': hmac-sha256 requires secret-header",
+            ch.name
+        ));
+    }
+    Ok(())
+}
+
+/// The templates used on receive: a syntax error only shows up on the first webhook,
+/// which is too late to notice it.
+fn validate_channel_templates(ch: &WebhookChannelConfig) -> Result<(), String> {
+    if let Some(tmpl) = &ch.secret_extract_template {
+        crypto::validate_template(tmpl).map_err(|e| {
+            format!(
+                "channel '{}': invalid secret-extract-template: {}",
+                ch.name, e
+            )
+        })?;
+    }
+    if let Some(tmpl) = &ch.secret_sign_template {
+        crypto::validate_template(tmpl)
+            .map_err(|e| format!("channel '{}': invalid secret-sign-template: {}", ch.name, e))?;
+    }
+    Ok(())
+}
+
+/// Signing a forward needs a header *and* a secret. `sign-secret` may be omitted —
+/// the channel's `webhook-secret` is the fallback — but a header with neither, or a
+/// secret with nowhere to put the signature, silently forwards unsigned requests.
+fn validate_forward_signing(
+    ch: &WebhookChannelConfig,
+    fwd: &WebhookForwardConfig,
+) -> Result<(), String> {
+    match (&fwd.sign_header, &fwd.sign_secret) {
+        (Some(_), None) if ch.webhook_secret.is_none() => {
+            return Err(format!(
+                "channel '{}': sign-header requires sign-secret \
+                 (or a webhook-secret to use as fallback)",
+                ch.name
+            ));
+        }
+        (None, Some(_)) => {
+            return Err(format!(
+                "channel '{}': sign-secret requires sign-header",
+                ch.name
+            ));
+        }
+        _ => {}
+    }
+    if let Some(tmpl) = &fwd.sign_template {
+        crypto::validate_template(tmpl)
+            .map_err(|e| format!("channel '{}': invalid sign-template: {}", ch.name, e))?;
+    }
+    Ok(())
+}
+
 impl AppConfig {
     /// Constant-time token lookup — for GET (client reads webhooks).
     pub fn find_channel_by_token(&self, bearer: &str) -> Option<&WebhookChannelConfig> {
@@ -315,57 +384,10 @@ impl AppConfig {
     /// Validates HMAC/template configuration at startup. Returns Err on misconfiguration.
     pub fn validate_templates(&self) -> Result<(), String> {
         for ch in &self.channels {
-            if ch.secret_type == SecretType::HmacSha256 {
-                if ch.webhook_secret.is_none() {
-                    return Err(format!(
-                        "channel '{}': hmac-sha256 requires webhook-secret",
-                        ch.name
-                    ));
-                }
-                if ch.secret_header.is_none() {
-                    return Err(format!(
-                        "channel '{}': hmac-sha256 requires secret-header",
-                        ch.name
-                    ));
-                }
-            }
-            if let Some(tmpl) = &ch.secret_extract_template {
-                crypto::validate_template(tmpl).map_err(|e| {
-                    format!(
-                        "channel '{}': invalid secret-extract-template: {}",
-                        ch.name, e
-                    )
-                })?;
-            }
-            if let Some(tmpl) = &ch.secret_sign_template {
-                crypto::validate_template(tmpl).map_err(|e| {
-                    format!("channel '{}': invalid secret-sign-template: {}", ch.name, e)
-                })?;
-            }
+            validate_channel_secret(ch)?;
+            validate_channel_templates(ch)?;
             if let Some(fwd) = &ch.forward {
-                match (&fwd.sign_header, &fwd.sign_secret) {
-                    (Some(_), None) => {
-                        if ch.webhook_secret.is_none() {
-                            return Err(format!(
-                                "channel '{}': sign-header requires sign-secret \
-                                 (or a webhook-secret to use as fallback)",
-                                ch.name
-                            ));
-                        }
-                    }
-                    (None, Some(_)) => {
-                        return Err(format!(
-                            "channel '{}': sign-secret requires sign-header",
-                            ch.name
-                        ));
-                    }
-                    _ => {}
-                }
-                if let Some(tmpl) = &fwd.sign_template {
-                    crypto::validate_template(tmpl).map_err(|e| {
-                        format!("channel '{}': invalid sign-template: {}", ch.name, e)
-                    })?;
-                }
+                validate_forward_signing(ch, fwd)?;
             }
         }
         Ok(())

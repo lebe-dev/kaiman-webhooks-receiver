@@ -14,7 +14,7 @@ async function apiFetch(
   const res = await fetch(path, { ...options, headers });
   if (res.status === 401) {
     clearToken();
-    window.location.reload();
+    globalThis.location.reload();
   }
   return res;
 }

@@ -164,7 +164,7 @@ mod tests {
         assert_eq!(events.len(), 2);
         assert_eq!(events[0].tags.get("channel").unwrap(), "telegram");
         assert!(
-            events[1].tags.get("channel").is_none(),
+            !events[1].tags.contains_key("channel"),
             "each request must get its own hub, otherwise tags bleed across requests"
         );
     }

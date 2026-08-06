@@ -6,14 +6,14 @@ use axum::{
     body::Bytes,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use subtle::ConstantTimeEq;
 
 use crate::AppState;
 use crate::middleware::client_ip::ClientIp;
 use crate::middleware::request_id::RequestId;
-use kwp_lib::domain::config::model::SecretType;
+use kwp_lib::domain::config::model::{SecretType, WebhookChannelConfig};
 use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::model::WebhookChannel;
 
@@ -27,6 +27,157 @@ fn inc_receive(channel: &str, status: &'static str, enabled: bool) {
         "status" => status
     )
     .increment(1);
+}
+
+/// The HMAC branch of secret verification: the signature the sender put in the
+/// header, extracted with the channel's template, against the one computed over
+/// this exact body.
+fn verify_hmac_secret(
+    channel_config: &WebhookChannelConfig,
+    request_id: &RequestId,
+    secret: &str,
+    provided_raw: Option<&str>,
+    body: &Bytes,
+) -> Result<bool, Response> {
+    let channel_name = &channel_config.name;
+
+    let Some(raw) = provided_raw else {
+        log::warn!("[req:{request_id}] missing secret header for channel: {channel_name}");
+        inc_receive(
+            channel_name,
+            "unauthorized",
+            channel_config.monitoring_metrics,
+        );
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
+    };
+
+    let extract_tmpl = channel_config
+        .secret_extract_template
+        .as_deref()
+        .unwrap_or("{{ raw }}");
+    let expected_hex = crypto::render_extract_template(extract_tmpl, raw).map_err(|e| {
+        log::error!(
+            "[req:{request_id}] secret-extract-template render failed for channel '{channel_name}': {e}"
+        );
+        inc_receive(
+            channel_name,
+            "internal_error",
+            channel_config.monitoring_metrics,
+        );
+        (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response()
+    })?;
+
+    let computed_hex = crypto::hmac_sha256_hex(secret.as_bytes(), body);
+    Ok(crypto::verify_hmac_hex(&expected_hex, &computed_hex))
+}
+
+/// Authorizes the request against the channel's secret.
+///
+/// A channel without both a secret and a header to read it from is unauthenticated
+/// by configuration, so it passes. `Err` carries the response to send instead.
+fn verify_secret(
+    channel_config: &WebhookChannelConfig,
+    request_id: &RequestId,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), Response> {
+    let channel_name = &channel_config.name;
+
+    let (Some(secret), Some(header_name)) = (
+        &channel_config.webhook_secret,
+        &channel_config.secret_header,
+    ) else {
+        return Ok(());
+    };
+
+    log::debug!("[req:{request_id}] verifying webhook secret for channel: '{channel_name}'");
+    let provided_raw = headers
+        .get(header_name.as_str())
+        .and_then(|v| v.to_str().ok());
+
+    let verified = match channel_config.secret_type {
+        SecretType::Plain => provided_raw
+            .is_some_and(|token| bool::from(token.as_bytes().ct_eq(secret.as_bytes()))),
+        SecretType::HmacSha256 => {
+            verify_hmac_secret(channel_config, request_id, secret, provided_raw, body)?
+        }
+    };
+
+    if !verified {
+        log::warn!("[req:{request_id}] invalid webhook secret for channel: {channel_name}");
+        inc_receive(
+            channel_name,
+            "unauthorized",
+            channel_config.monitoring_metrics,
+        );
+        return Err((StatusCode::UNAUTHORIZED, "Unauthorized").into_response());
+    }
+
+    log::debug!("[req:{request_id}] webhook secret verified for channel: {channel_name}");
+    Ok(())
+}
+
+/// Everything that can be rejected by looking at the body alone: its size, the
+/// declared content type, and whether it parses as JSON.
+fn validate_body(
+    state: &AppState,
+    channel_config: &WebhookChannelConfig,
+    request_id: &RequestId,
+    headers: &HeaderMap,
+    body: &Bytes,
+) -> Result<(), Response> {
+    let channel_name = &channel_config.name;
+
+    let effective_limit = channel_config
+        .max_body_size
+        .unwrap_or(state.config.default_body_limit);
+    if body.len() > effective_limit {
+        log::warn!(
+            "[req:{}] request body too large for channel {}: {} bytes > limit {} bytes",
+            request_id,
+            channel_name,
+            body.len(),
+            effective_limit
+        );
+        inc_receive(
+            channel_name,
+            "payload_too_large",
+            channel_config.monitoring_metrics,
+        );
+        return Err((StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large").into_response());
+    }
+
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !content_type.starts_with("application/json") {
+        log::warn!(
+            "[req:{request_id}] unsupported content type for channel {channel_name}: {content_type}"
+        );
+        inc_receive(
+            channel_name,
+            "invalid_content_type",
+            channel_config.monitoring_metrics,
+        );
+        return Err((
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Expected application/json",
+        )
+            .into_response());
+    }
+
+    if serde_json::from_slice::<serde_json::Value>(body).is_err() {
+        log::warn!("[req:{request_id}] invalid JSON body for channel {channel_name}");
+        inc_receive(
+            channel_name,
+            "invalid_json",
+            channel_config.monitoring_metrics,
+        );
+        return Err((StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON").into_response());
+    }
+
+    Ok(())
 }
 
 pub async fn receive_webhook_route(
@@ -76,140 +227,12 @@ pub async fn receive_webhook_route(
         return (StatusCode::FORBIDDEN, "Forbidden").into_response();
     }
 
-    if let (Some(secret), Some(header_name)) = (
-        &channel_config.webhook_secret,
-        &channel_config.secret_header,
-    ) {
-        log::debug!(
-            "[req:{}] verifying webhook secret for channel: '{}'",
-            request_id,
-            channel_name
-        );
-        let provided_raw = headers
-            .get(header_name.as_str())
-            .and_then(|v| v.to_str().ok());
-
-        let verified = match channel_config.secret_type {
-            SecretType::Plain => match provided_raw {
-                Some(token) => token.as_bytes().ct_eq(secret.as_bytes()).into(),
-                None => false,
-            },
-            SecretType::HmacSha256 => {
-                let Some(raw) = provided_raw else {
-                    log::warn!(
-                        "[req:{}] missing secret header for channel: {}",
-                        request_id,
-                        channel_name
-                    );
-                    inc_receive(
-                        &channel_name,
-                        "unauthorized",
-                        channel_config.monitoring_metrics,
-                    );
-                    return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-                };
-                let extract_tmpl = channel_config
-                    .secret_extract_template
-                    .as_deref()
-                    .unwrap_or("{{ raw }}");
-                let expected_hex = match crypto::render_extract_template(extract_tmpl, raw) {
-                    Ok(h) => h,
-                    Err(e) => {
-                        log::error!(
-                            "[req:{}] secret-extract-template render failed for channel '{}': {}",
-                            request_id,
-                            channel_name,
-                            e
-                        );
-                        inc_receive(
-                            &channel_name,
-                            "internal_error",
-                            channel_config.monitoring_metrics,
-                        );
-                        return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
-                    }
-                };
-                let computed_hex = crypto::hmac_sha256_hex(secret.as_bytes(), &body);
-                crypto::verify_hmac_hex(&expected_hex, &computed_hex)
-            }
-        };
-
-        if verified {
-            log::debug!(
-                "[req:{}] webhook secret verified for channel: {}",
-                request_id,
-                channel_name
-            );
-        } else {
-            log::warn!(
-                "[req:{}] invalid webhook secret for channel: {}",
-                request_id,
-                channel_name
-            );
-            inc_receive(
-                &channel_name,
-                "unauthorized",
-                channel_config.monitoring_metrics,
-            );
-            return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
-        }
+    if let Err(response) = verify_secret(channel_config, &request_id, &headers, &body) {
+        return response;
     }
 
-    let effective_limit = channel_config
-        .max_body_size
-        .unwrap_or(state.config.default_body_limit);
-
-    if body.len() > effective_limit {
-        log::warn!(
-            "[req:{}] request body too large for channel {}: {} bytes > limit {} bytes",
-            request_id,
-            channel_name,
-            body.len(),
-            effective_limit
-        );
-        inc_receive(
-            &channel_name,
-            "payload_too_large",
-            channel_config.monitoring_metrics,
-        );
-        return (StatusCode::PAYLOAD_TOO_LARGE, "Payload Too Large").into_response();
-    }
-
-    let content_type = headers
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if !content_type.starts_with("application/json") {
-        log::warn!(
-            "[req:{}] unsupported content type for channel {}: {}",
-            request_id,
-            channel_name,
-            content_type
-        );
-        inc_receive(
-            &channel_name,
-            "invalid_content_type",
-            channel_config.monitoring_metrics,
-        );
-        return (
-            StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            "Expected application/json",
-        )
-            .into_response();
-    }
-
-    if serde_json::from_slice::<serde_json::Value>(&body).is_err() {
-        log::warn!(
-            "[req:{}] invalid JSON body for channel {}",
-            request_id,
-            channel_name
-        );
-        inc_receive(
-            &channel_name,
-            "invalid_json",
-            channel_config.monitoring_metrics,
-        );
-        return (StatusCode::UNPROCESSABLE_ENTITY, "Invalid JSON").into_response();
+    if let Err(response) = validate_body(&state, channel_config, &request_id, &headers, &body) {
+        return response;
     }
 
     log::debug!(
@@ -566,7 +589,7 @@ mod tests {
         // channel override = 500, default = 10 — 100-byte body fits in channel override
         let app = build_app(vec![make_channel("test", Some(500))], 10).await;
         let mut json_body = b"\"".to_vec();
-        json_body.extend_from_slice(&vec![b'a'; 98]);
+        json_body.extend_from_slice(&[b'a'; 98]);
         json_body.push(b'"'); // 100 bytes total
         assert_eq!(
             send_json(app, "test", json_body, None).await,

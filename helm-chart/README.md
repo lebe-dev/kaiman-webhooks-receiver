@@ -76,3 +76,28 @@ SQLite data is stored under `DATA_PATH`. A PersistentVolumeClaim is created auto
 | `persistence.accessMode` | PVC access mode | `ReadWriteOnce` |
 
 > **Note:** `ReadWriteOnce` does not support `replicaCount > 1` with most storage classes.
+
+### Resources (`.resources`)
+
+Sized for the actual workload: one Rust binary forwarding webhooks through SQLite.
+
+| Parameter | Description | Default |
+|---|---|---|
+| `resources.requests.cpu` | CPU reserved by the scheduler | `50m` |
+| `resources.requests.memory` | Memory reserved by the scheduler | `64Mi` |
+| `resources.requests.ephemeral-storage` | Local storage reserved by the scheduler | `128Mi` |
+| `resources.limits.memory` | Memory ceiling; the container is OOM-killed above it | `128Mi` |
+| `resources.limits.ephemeral-storage` | Local storage ceiling; the pod is evicted above it | `512Mi` |
+
+There is deliberately no CPU limit: a forwarding burst should be allowed to use idle CPU rather than be throttled. Raise `limits.ephemeral-storage` if `LOG_TARGET` points at a file instead of `stdout`.
+
+### Service account (`.serviceAccount`)
+
+| Parameter | Description | Default |
+|---|---|---|
+| `serviceAccount.create` | Create a ServiceAccount for the release | `true` |
+| `serviceAccount.automount` | Mount the ServiceAccount token into the pod | `false` |
+| `serviceAccount.annotations` | Annotations applied to the ServiceAccount | `{}` |
+| `serviceAccount.name` | Use an existing ServiceAccount instead of a generated name | `""` |
+
+KWP never talks to the Kubernetes API, so the token is not mounted by default — it would only be a credential an attacker could reuse. Set `serviceAccount.automount: true` if a sidecar in the pod needs it.

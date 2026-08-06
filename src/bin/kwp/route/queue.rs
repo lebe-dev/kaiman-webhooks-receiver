@@ -6,14 +6,14 @@ use axum::{
     Extension, Json,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use serde_json::Value;
 
 use crate::AppState;
 use crate::middleware::request_id::RequestId;
-use kwp_lib::domain::config::model::WebhookForwardConfig;
+use kwp_lib::domain::config::model::{WebhookChannelConfig, WebhookForwardConfig};
 use kwp_lib::domain::crypto;
 use kwp_lib::domain::webhook::backoff::{self, FailureKind};
 use kwp_lib::domain::webhook::model::{ChannelForwardStatus, Webhook, WebhookChannel};
@@ -54,50 +54,6 @@ fn now_unix() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_secs() as i64
-}
-
-/// Applies the channel's backoff to a webhook whose manual retry failed.
-///
-/// Without this a failed manual retry would leave the webhook due immediately,
-/// undoing the delay the forwarder had already assigned to it.
-#[allow(clippy::too_many_arguments)]
-async fn record_manual_failure(
-    state: &AppState,
-    request_id: &RequestId,
-    channel_name: &str,
-    webhook: &Webhook,
-    forward_cfg: &WebhookForwardConfig,
-    kind: FailureKind,
-    retry_after: Option<Duration>,
-    error_msg: &str,
-) {
-    let Some(webhook_id) = webhook.id else {
-        return;
-    };
-
-    let delay = backoff::next_delay(
-        &forward_cfg.backoff(&state.config.forward_backoff),
-        kind,
-        webhook.forward_attempts + 1,
-        retry_after,
-        backoff::clock_jitter_unit(),
-    );
-    let next_attempt_at = now_unix() + delay.as_secs() as i64;
-
-    if let Err(e) = state
-        .webhook_service
-        .record_forward_failure(webhook_id, error_msg, next_attempt_at)
-        .await
-    {
-        log::error!("[req:{request_id}] failed to record attempt for webhook {webhook_id}: {e}");
-    }
-
-    if let Ok(mut map) = state.forward_statuses.write()
-        && let Some(status) = map.get_mut(channel_name)
-    {
-        status.last_error_at = Some(now_unix());
-        status.last_error_message = Some(error_msg.to_string());
-    }
 }
 
 #[derive(Serialize)]
@@ -360,6 +316,254 @@ pub async fn clear_queue_route(
     }
 }
 
+/// One manual retry of one webhook: everything the steps below share.
+///
+/// Bundled into a struct because the alternative is half a dozen parameters
+/// repeated on every helper — the same reason `record_failure` used to carry an
+/// `allow(too_many_arguments)`.
+struct RetryContext<'a> {
+    state: &'a AppState,
+    request_id: &'a RequestId,
+    channel_name: &'a str,
+    webhook_id: i64,
+    webhook: &'a Webhook,
+    channel_cfg: &'a WebhookChannelConfig,
+    forward_cfg: &'a WebhookForwardConfig,
+}
+
+impl RetryContext<'_> {
+    /// Rebuilds the forward request the way the background forwarder would: the
+    /// stored headers minus the ignored ones and minus the signature header,
+    /// which is re-signed here rather than replayed.
+    fn build_request(&self) -> Result<reqwest::RequestBuilder, Response> {
+        let mut request = self
+            .state
+            .http_client
+            .post(&self.forward_cfg.url)
+            .timeout(Duration::from_secs(self.forward_cfg.timeout_seconds))
+            .header("content-type", "application/json")
+            .body(self.webhook.payload.clone());
+
+        for (key, value) in &self.webhook.headers {
+            if self.state.config.ignored_headers.contains(key) {
+                continue;
+            }
+            if self
+                .forward_cfg
+                .sign_header
+                .as_deref()
+                .is_some_and(|h| h.eq_ignore_ascii_case(key))
+            {
+                continue;
+            }
+            request = request.header(key, value);
+        }
+
+        let Some(sign_header) = &self.forward_cfg.sign_header else {
+            return Ok(request);
+        };
+        let header_value = self.sign(&self.webhook.payload)?;
+        Ok(request.header(sign_header.as_str(), header_value))
+    }
+
+    /// Computes the value of the signature header for `payload`.
+    ///
+    /// Startup validation guarantees a secret is reachable here, so a missing one
+    /// is a bug rather than bad input — hence 500 and `error!`.
+    fn sign(&self, payload: &[u8]) -> Result<String, Response> {
+        let effective_secret = self
+            .forward_cfg
+            .sign_secret
+            .as_deref()
+            .or(self.channel_cfg.webhook_secret.as_deref());
+        let Some(sign_secret) = effective_secret else {
+            log::error!(
+                "[req:{}] channel '{}': sign-header configured but no sign-secret or webhook-secret available",
+                self.request_id,
+                self.channel_name
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "sign-header configured but no secret available",
+            )
+                .into_response());
+        };
+
+        let sig = crypto::hmac_sha256_hex(sign_secret.as_bytes(), payload);
+        let Some(tmpl) = self.forward_cfg.sign_template.as_deref() else {
+            return Ok(sig);
+        };
+        crypto::render_sign_template(tmpl, &sig).map_err(|e| {
+            log::error!(
+                "[req:{}] sign-template render failed for channel '{}': {}",
+                self.request_id,
+                self.channel_name,
+                e
+            );
+            (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response()
+        })
+    }
+
+    /// The request never reached the target: no status code, so the whole error
+    /// chain is all the operator gets.
+    async fn on_transport_error(&self, error: reqwest::Error) -> Response {
+        let mut cause = format!("{error}");
+        let mut src: &dyn std::error::Error = &error;
+        while let Some(next) = src.source() {
+            cause.push_str(&format!(": {next}"));
+            src = next;
+        }
+        log::warn!(
+            "[req:{}] retry webhook {} for channel '{}' failed: {}",
+            self.request_id,
+            self.webhook_id,
+            self.channel_name,
+            cause
+        );
+
+        let error_msg = format!("network error: {cause}");
+        self.record_failure(FailureKind::Transient, None, &error_msg)
+            .await;
+
+        Self::result(false, None, Some(error_msg), None)
+    }
+
+    /// The target answered. Whether that counts as delivery is the channel's
+    /// `expected_status` to decide.
+    async fn on_response(&self, resp: reqwest::Response) -> Response {
+        let status_code = resp.status().as_u16();
+        // Read before the body: consuming the response drops the headers.
+        let retry_after = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(backoff::parse_retry_after);
+        let body = resp
+            .text()
+            .await
+            .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
+
+        if status_code != self.forward_cfg.expected_status {
+            log::warn!(
+                "[req:{}] retry webhook {} for channel '{}' got unexpected status {}: {}",
+                self.request_id,
+                self.webhook_id,
+                self.channel_name,
+                status_code,
+                body
+            );
+            self.record_failure(
+                backoff::classify_status(status_code),
+                retry_after,
+                &format!("HTTP {status_code}: {body}"),
+            )
+            .await;
+            return Self::result(false, Some(status_code), None, Some(body));
+        }
+
+        log::info!(
+            "[req:{}] retry webhook {} for channel '{}' succeeded (status={})",
+            self.request_id,
+            self.webhook_id,
+            self.channel_name,
+            status_code
+        );
+        self.forget_delivered().await;
+        Self::result(true, Some(status_code), None, Some(body))
+    }
+
+    /// Removes a webhook the target has accepted, and decrements the queue counter.
+    async fn forget_delivered(&self) {
+        // A webhook that was delivered but not removed is still queued, so
+        // the forwarder will deliver it a second time. The operator has to
+        // learn that from here — the duplicate itself looks like a success.
+        if let Err(e) = self
+            .state
+            .webhook_service
+            .delete_webhook(
+                &WebhookChannel::new(self.channel_name.to_string()),
+                self.webhook_id,
+            )
+            .await
+        {
+            log::error!(
+                "[req:{}] webhook {} for channel '{}' was delivered by manual retry but could not be removed, it will be delivered again: {}",
+                self.request_id,
+                self.webhook_id,
+                self.channel_name,
+                e
+            );
+        }
+
+        if let Ok(mut map) = self.state.forward_statuses.write()
+            && let Some(status) = map.get_mut(self.channel_name)
+        {
+            status.last_success_at = Some(now_unix());
+            status.queue_size = (status.queue_size - 1).max(0);
+        }
+    }
+
+    /// Applies the channel's backoff to a webhook whose manual retry failed.
+    ///
+    /// Without this a failed manual retry would leave the webhook due immediately,
+    /// undoing the delay the forwarder had already assigned to it.
+    async fn record_failure(
+        &self,
+        kind: FailureKind,
+        retry_after: Option<Duration>,
+        error_msg: &str,
+    ) {
+        let delay = backoff::next_delay(
+            &self.forward_cfg.backoff(&self.state.config.forward_backoff),
+            kind,
+            self.webhook.forward_attempts + 1,
+            retry_after,
+            backoff::clock_jitter_unit(),
+        );
+        let next_attempt_at = now_unix() + delay.as_secs() as i64;
+
+        if let Err(e) = self
+            .state
+            .webhook_service
+            .record_forward_failure(self.webhook_id, error_msg, next_attempt_at)
+            .await
+        {
+            log::error!(
+                "[req:{}] failed to record attempt for webhook {}: {}",
+                self.request_id,
+                self.webhook_id,
+                e
+            );
+        }
+
+        if let Ok(mut map) = self.state.forward_statuses.write()
+            && let Some(status) = map.get_mut(self.channel_name)
+        {
+            status.last_error_at = Some(now_unix());
+            status.last_error_message = Some(error_msg.to_string());
+        }
+    }
+
+    /// A retry always answers 200 — the payload says how the forward itself went.
+    fn result(
+        success: bool,
+        status_code: Option<u16>,
+        error: Option<String>,
+        body: Option<String>,
+    ) -> Response {
+        (
+            StatusCode::OK,
+            Json(RetryResponse {
+                success,
+                status_code,
+                body,
+                error,
+            }),
+        )
+            .into_response()
+    }
+}
+
 #[derive(Serialize)]
 pub struct RetryResponse {
     pub success: bool,
@@ -368,15 +572,59 @@ pub struct RetryResponse {
     pub error: Option<String>,
 }
 
+/// Resolves the channel and the forward target to retry against.
+fn find_forward_target<'a>(
+    state: &'a AppState,
+    channel_name: &str,
+) -> Result<(&'a WebhookChannelConfig, &'a WebhookForwardConfig), Response> {
+    let Some(channel_cfg) = state.config.find_channel_by_name(channel_name) else {
+        return Err((StatusCode::NOT_FOUND, "Channel not found").into_response());
+    };
+    let Some(forward_cfg) = &channel_cfg.forward else {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Channel has no forward configuration",
+        )
+            .into_response());
+    };
+    Ok((channel_cfg, forward_cfg))
+}
+
+/// Loads the webhook and checks it really belongs to `channel_name` — an id from
+/// another channel must not be re-sent through this channel's forward config.
+async fn load_webhook_to_retry(
+    state: &AppState,
+    request_id: &RequestId,
+    channel_name: &str,
+    webhook_id: i64,
+) -> Result<Webhook, Response> {
+    let webhook = match state.webhook_service.get_webhook(webhook_id).await {
+        Ok(Some(w)) => w,
+        Ok(None) => return Err((StatusCode::NOT_FOUND, "Webhook not found").into_response()),
+        Err(e) if e.is_busy() => {
+            log::warn!("[req:{request_id}] storage busy fetching webhook {webhook_id}: {e}");
+            return Err(crate::route::storage_busy_response());
+        }
+        Err(e) => {
+            log::error!("[req:{request_id}] failed to get webhook {webhook_id}: {e}");
+            return Err((StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response());
+        }
+    };
+
+    if webhook.channel.as_str() != channel_name {
+        return Err((StatusCode::NOT_FOUND, "Webhook not found in this channel").into_response());
+    }
+    Ok(webhook)
+}
+
 pub async fn retry_webhook_route(
     State(state): State<Arc<AppState>>,
     Extension(request_id): Extension<RequestId>,
     Path((channel_name, webhook_id)): Path<(String, i64)>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    let bearer = match extract_bearer(&headers) {
-        Some(b) => b,
-        None => return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response(),
+    let Some(bearer) = extract_bearer(&headers) else {
+        return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
     };
 
     if let Err((status, msg)) = authorize_channel(&state, bearer, &channel_name) {
@@ -384,246 +632,37 @@ pub async fn retry_webhook_route(
     }
 
     log::info!(
-        "[req:{}] request to retry webhook {} for channel: {}",
-        request_id,
-        webhook_id,
-        channel_name
+        "[req:{request_id}] request to retry webhook {webhook_id} for channel: {channel_name}"
     );
 
-    let channel_cfg = match state.config.find_channel_by_name(&channel_name) {
-        Some(c) => c,
-        None => return (StatusCode::NOT_FOUND, "Channel not found").into_response(),
+    let (channel_cfg, forward_cfg) = match find_forward_target(&state, &channel_name) {
+        Ok(target) => target,
+        Err(response) => return response,
     };
 
-    let forward_cfg = match &channel_cfg.forward {
-        Some(f) => f,
-        None => {
-            return (
-                StatusCode::BAD_REQUEST,
-                "Channel has no forward configuration",
-            )
-                .into_response();
-        }
+    let webhook = match load_webhook_to_retry(&state, &request_id, &channel_name, webhook_id).await {
+        Ok(webhook) => webhook,
+        Err(response) => return response,
     };
 
-    let webhook = match state.webhook_service.get_webhook(webhook_id).await {
-        Ok(Some(w)) => w,
-        Ok(None) => return (StatusCode::NOT_FOUND, "Webhook not found").into_response(),
-        Err(e) if e.is_busy() => {
-            log::warn!(
-                "[req:{}] storage busy fetching webhook {}: {}",
-                request_id,
-                webhook_id,
-                e
-            );
-            return crate::route::storage_busy_response();
-        }
-        Err(e) => {
-            log::error!(
-                "[req:{}] failed to get webhook {}: {}",
-                request_id,
-                webhook_id,
-                e
-            );
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Error").into_response();
-        }
+    let ctx = RetryContext {
+        state: &state,
+        request_id: &request_id,
+        channel_name: &channel_name,
+        webhook_id,
+        webhook: &webhook,
+        channel_cfg,
+        forward_cfg,
     };
 
-    if webhook.channel.as_str() != channel_name {
-        return (StatusCode::NOT_FOUND, "Webhook not found in this channel").into_response();
-    }
-
-    let body_bytes = webhook.payload.clone();
-
-    let timeout = Duration::from_secs(forward_cfg.timeout_seconds);
-    let mut request = state
-        .http_client
-        .post(&forward_cfg.url)
-        .timeout(timeout)
-        .header("content-type", "application/json")
-        .body(body_bytes.clone());
-
-    for (key, value) in &webhook.headers {
-        if state.config.ignored_headers.contains(key) {
-            continue;
-        }
-        if forward_cfg
-            .sign_header
-            .as_deref()
-            .is_some_and(|h| h.eq_ignore_ascii_case(key))
-        {
-            continue;
-        }
-        request = request.header(key, value);
-    }
-
-    if let Some(sign_header) = &forward_cfg.sign_header {
-        let effective_secret = forward_cfg
-            .sign_secret
-            .as_deref()
-            .or(channel_cfg.webhook_secret.as_deref());
-        let Some(sign_secret) = effective_secret else {
-            log::error!(
-                "[req:{}] channel '{}': sign-header configured but no sign-secret or webhook-secret available",
-                request_id,
-                channel_name
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "sign-header configured but no secret available",
-            )
-                .into_response();
-        };
-        let sig = crypto::hmac_sha256_hex(sign_secret.as_bytes(), &body_bytes);
-        let header_value = match forward_cfg.sign_template.as_deref() {
-            Some(tmpl) => match crypto::render_sign_template(tmpl, &sig) {
-                Ok(v) => v,
-                Err(e) => {
-                    log::error!(
-                        "[req:{}] sign-template render failed for channel '{}': {}",
-                        request_id,
-                        channel_name,
-                        e
-                    );
-                    return (StatusCode::INTERNAL_SERVER_ERROR, "Template error").into_response();
-                }
-            },
-            None => sig,
-        };
-        request = request.header(sign_header.as_str(), header_value);
-    }
+    let request = match ctx.build_request() {
+        Ok(request) => request,
+        Err(response) => return response,
+    };
 
     match request.send().await {
-        Err(e) => {
-            let mut cause = format!("{e}");
-            let mut src: &dyn std::error::Error = &e;
-            while let Some(next) = src.source() {
-                cause.push_str(&format!(": {next}"));
-                src = next;
-            }
-            log::warn!(
-                "[req:{}] retry webhook {} for channel '{}' failed: {}",
-                request_id,
-                webhook_id,
-                channel_name,
-                cause
-            );
-
-            let error_msg = format!("network error: {cause}");
-            record_manual_failure(
-                &state,
-                &request_id,
-                &channel_name,
-                &webhook,
-                forward_cfg,
-                FailureKind::Transient,
-                None,
-                &error_msg,
-            )
-            .await;
-
-            (
-                StatusCode::OK,
-                Json(RetryResponse {
-                    success: false,
-                    status_code: None,
-                    body: None,
-                    error: Some(error_msg),
-                }),
-            )
-                .into_response()
-        }
-        Ok(resp) => {
-            let status_code = resp.status().as_u16();
-            // Read before the body: consuming the response drops the headers.
-            let retry_after = resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok())
-                .and_then(backoff::parse_retry_after);
-            let body = resp
-                .text()
-                .await
-                .unwrap_or_else(|e| format!("<failed to read body: {e}>"));
-
-            if status_code == forward_cfg.expected_status {
-                log::info!(
-                    "[req:{}] retry webhook {} for channel '{}' succeeded (status={})",
-                    request_id,
-                    webhook_id,
-                    channel_name,
-                    status_code
-                );
-
-                // A webhook that was delivered but not removed is still queued, so
-                // the forwarder will deliver it a second time. The operator has to
-                // learn that from here — the duplicate itself looks like a success.
-                if let Err(e) = state
-                    .webhook_service
-                    .delete_webhook(&WebhookChannel::new(channel_name.clone()), webhook_id)
-                    .await
-                {
-                    log::error!(
-                        "[req:{}] webhook {} for channel '{}' was delivered by manual retry but could not be removed, it will be delivered again: {}",
-                        request_id,
-                        webhook_id,
-                        channel_name,
-                        e
-                    );
-                }
-
-                if let Ok(mut map) = state.forward_statuses.write()
-                    && let Some(status) = map.get_mut(&channel_name)
-                {
-                    status.last_success_at = Some(now_unix());
-                    status.queue_size = (status.queue_size - 1).max(0);
-                }
-
-                (
-                    StatusCode::OK,
-                    Json(RetryResponse {
-                        success: true,
-                        status_code: Some(status_code),
-                        body: Some(body),
-                        error: None,
-                    }),
-                )
-                    .into_response()
-            } else {
-                let error_msg = format!("HTTP {}: {}", status_code, body);
-                log::warn!(
-                    "[req:{}] retry webhook {} for channel '{}' got unexpected status {}: {}",
-                    request_id,
-                    webhook_id,
-                    channel_name,
-                    status_code,
-                    body
-                );
-
-                record_manual_failure(
-                    &state,
-                    &request_id,
-                    &channel_name,
-                    &webhook,
-                    forward_cfg,
-                    backoff::classify_status(status_code),
-                    retry_after,
-                    &error_msg,
-                )
-                .await;
-
-                (
-                    StatusCode::OK,
-                    Json(RetryResponse {
-                        success: false,
-                        status_code: Some(status_code),
-                        body: Some(body),
-                        error: None,
-                    }),
-                )
-                    .into_response()
-            }
-        }
+        Err(e) => ctx.on_transport_error(e).await,
+        Ok(resp) => ctx.on_response(resp).await,
     }
 }
 
