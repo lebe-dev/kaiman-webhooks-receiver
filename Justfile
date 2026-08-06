@@ -1,3 +1,4 @@
+# Load variables from .env (gitignored) into recipe environments — e.g. SONAR_TOKEN.
 set dotenv-load
 
 version := `cat Cargo.toml | grep version | head -1 | cut -d " " -f 3 | tr -d "\""`
@@ -7,9 +8,13 @@ image := 'tinyops/kwp'
 trivyReportFile := "docs/trivy-scan-report.txt"
 chartName := `cat helm-chart/Chart.yaml | yq -r '.name'`
 chartVersion := `cat helm-chart/Chart.yaml | yq -r '.version'`
+coverageDir := "coverage"
+lcovReport := coverageDir + "/lcov.info"
+clippyReport := coverageDir + "/clippy-report.json"
 
 cleanup:
     rm -f {{ chartName }}-*.tgz
+    rm -rf {{ coverageDir }} .scannerwork
 
 bump-frontend-deps:
     cd frontend && rm -rf node_modules yarn.lock && yarn install
@@ -47,6 +52,29 @@ test:
     cargo test --lib
     cargo test --bin kwp
 
+# Run the tests instrumented and write an LCOV report for SonarQube
+coverage:
+    #!/usr/bin/env bash
+    # Requires `cargo install cargo-llvm-cov` and `rustup component add llvm-tools`.
+    set -euo pipefail
+    mkdir -p {{ coverageDir }}
+    cargo llvm-cov --lib --bin kwp --lcov --output-path {{ lcovReport }}
+    # llvm-cov records absolute host paths; the scanner sees the project mounted
+    # at /usr/src and would resolve none of them. Make them project-relative.
+    sed -i.bak "s|^SF:$PWD/|SF:|" {{ lcovReport }}
+    rm -f {{ lcovReport }}.bak
+    echo "coverage report: {{ lcovReport }}"
+
+# Clippy findings in SonarQube's expected JSON format
+clippy-report:
+    #!/usr/bin/env bash
+    # The sonar-scanner-cli image has no Rust toolchain, so clippy has to run
+    # here rather than inside the scanner (sonar.rust.clippy.enabled=false).
+    set -euo pipefail
+    mkdir -p {{ coverageDir }}
+    cargo clippy --all-targets --message-format=json > {{ clippyReport }}
+    echo "clippy report: {{ clippyReport }}"
+
 run-backend:
     cargo run
 
@@ -65,6 +93,29 @@ frontend-build:
 
 build-release: frontend-build lint
     cargo build --release
+
+# --- SonarQube (static analysis) ---
+sonarHostUrl := env_var_or_default("SONAR_HOST_URL", "http://host.docker.internal:9000")
+
+# Scan the project on SonarQube, with fresh coverage and clippy reports
+sonar-scan: coverage clippy-report
+    #!/usr/bin/env bash
+    # Scope, exclusions and report paths live in sonar-project.properties;
+    # only the version is passed here, because it comes from Cargo.toml.
+    set -euo pipefail
+    if [ -z "${SONAR_TOKEN:-}" ]; then
+        echo "error: SONAR_TOKEN is not set." >&2
+        echo "  Generate a token at {{ sonarHostUrl }} -> My Account -> Security," >&2
+        echo "  then add it to .env:  SONAR_TOKEN=sqp_xxx" >&2
+        exit 1
+    fi
+    docker run --rm \
+        --add-host=host.docker.internal:host-gateway \
+        -e SONAR_HOST_URL="{{ sonarHostUrl }}" \
+        -e SONAR_TOKEN="$SONAR_TOKEN" \
+        -v "$PWD:/usr/src" \
+        sonarsource/sonar-scanner-cli:latest \
+        -Dsonar.projectVersion="{{ version }}"
 
 # HELM CHART
 

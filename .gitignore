@@ -9,3 +9,5 @@
 /data
 /*.tgz
 /static
+/coverage
+/.scannerwork
