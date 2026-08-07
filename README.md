@@ -51,6 +51,4 @@ Webhooks Proxy provides a single entry point for webhooks following security bes
 ## Roadmap
 
 - Endpoint: /api/health
-- Config: turn on/off API
 - OAuth2 support
-- Exponential backoff
